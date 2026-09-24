@@ -1,0 +1,27 @@
+你现在运行在一台 Windows 电脑上。
+当前 Workspace 是："双阳极等离子喷涂智能工艺设计平台"。
+
+当前任务只做：Windows 环境部署、测试、启动。
+
+禁止修改：
+机器学习逻辑、GroupKFold、OOF、三级代理模型、数据字段、中文界面、论文输出逻辑、Pareto 逻辑。
+
+请按以下顺序执行：
+
+1. 检查 Windows 系统和 Python 版本。
+2. 优先使用 Python 3.11 或 3.12。
+3. 检查 app.py、requirements.txt、src、config、scripts、data。
+4. 不使用任何从 macOS 复制来的 .venv。
+5. 在项目根目录创建新的 Windows .venv。
+6. 使用：.venv\Scripts\python.exe 安装 requirements.txt。
+7. 逐项测试：numpy、pandas、scikit-learn、xgboost、streamlit、plotly、matplotlib、openpyxl、pyyaml、joblib、shap、kaleido。
+8. 检查 XGBoost。不要使用：Homebrew、libomp.dylib、Mac dylib。
+9. 如果存在：scripts/platform_check.py，运行。
+10. 运行：scripts/smoke_test.py
+11. 如果存在：scripts/leakage_test.py，运行。
+12. 如果存在：scripts/output_test.py，运行。
+13. 如果存在：scripts/usability_test.py，运行。
+14. 如果发现 Windows 路径兼容问题：只修复跨平台兼容问题。禁止更改模型逻辑。
+15. 所有测试通过后启动：.venv\Scripts\python.exe -m streamlit run app.py
+16. 保持 Streamlit 运行。
+17. 最后报告：Python 版本、Windows .venv 状态、XGBoost 状态、smoke_test、leakage_test、output_test、usability_test、本地访问地址（默认应为 http://localhost:8501）。

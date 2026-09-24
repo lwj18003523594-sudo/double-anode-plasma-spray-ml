@@ -1,0 +1,75 @@
+# ============================================================
+# 双阳极等离子喷涂智能工艺设计平台 .gitignore（V1.5 主版本）
+# 原则：源码 / 配置 / 模板 / Demo 数据 / 测试入库；
+#       运行产物与本机环境一律不入库（可由源码+数据重新生成）。
+# ============================================================
+
+# ---- Python 虚拟环境（Windows 与 macOS 各自本地创建，绝不上传）----
+.venv/
+venv/
+env/
+.venv*/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- pip 缓存 ----
+.pip-cache/
+pip-cache/
+*.egg-info/
+
+# ---- Streamlit 缓存与本地密钥 ----
+.streamlit/cache/
+.streamlit/secrets.toml
+
+# ---- 操作系统临时文件 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.temp
+~$*
+*.swp
+*~
+
+# ---- 临时日志 ----
+outputs/logs/
+*.log
+
+# ---- 临时 ZIP 产物（论文图表包等运行时压缩文件）----
+*.zip
+
+# ---- 运行产物：图表 / 报告 / 快照（不入库，可重新生成）----
+# 注意：outputs 用 /* 而非 /，以便为跨机器回归基线开例外
+outputs/*
+!outputs/v132_baseline_predictions.json
+
+# ---- 运行产物：快速分析 Run 目录 ----
+runs/
+
+# ---- 模型产物（训练生成，体积大且随测试变化；由源码+数据可复现）----
+models/
+
+# ---- 用户上传的真实 / 文献数据（科研数据不进版本库；Demo 与模板除外）----
+data/user/
+data/dual_anode/real/
+data/dual_anode/literature/
+data/conventional_aps/
+data/cascade/
+data/literature_test/
+
+# ---- macOS XGBoost OpenMP 补丁（各机器自行安装，不入库）----
+libomp.dylib
+libomp*.dylib
+
+# ---- WorkBuddy 会话 / 记忆数据（本机 AI 助手内部数据）----
+.workbuddy/
+
+# ---- IDE ----
+.idea/
+.vscode/

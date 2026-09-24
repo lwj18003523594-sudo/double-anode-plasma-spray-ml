@@ -1,0 +1,9 @@
+objectives:
+  porosity_pct: minimize
+  bond_strength_MPa: maximize
+  coupled_damage_rate: minimize
+constraints:
+  deposition_efficiency_pct:
+    min: 45
+  powder_feed_g_min:
+    min: 15

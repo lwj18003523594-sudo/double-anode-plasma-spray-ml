@@ -1,0 +1,59 @@
+# V1.4 多电极 / 级联等离子喷涂模式 Schema（独立体系，与双阳极/APS 字段互不映射）
+# 适用于：multi-cathode / multi-electrode / cascade / multi-stage / 模块化级联喷枪。
+# 所有字段允许缺省（spec 六：不得要求每篇文献都有全部参数）。
+meta:
+  experiment_id: {unit: "-", required: false}
+  batch_id: {unit: "-", required: false}
+  sample_id: {unit: "-", required: false}
+  replicate_id: {unit: "-", required: false}
+
+structure_inputs:
+  torch_type: {unit: "-", required: false, categorical: true}
+  electrode_count: {unit: "-", min: 1.0, max: 12.0, optimizable: false, required: false}
+  cathode_count: {unit: "-", min: 1.0, max: 8.0, optimizable: false, required: false}
+  anode_count: {unit: "-", min: 1.0, max: 8.0, optimizable: false, required: false}
+  cascade_stage_count: {unit: "-", min: 1.0, max: 10.0, optimizable: false, required: false}
+  cascade_ring_count: {unit: "-", min: 0.0, max: 10.0, optimizable: false, required: false}
+  cascade_length_mm: {unit: "mm", min: 0.0, max: 400.0, optimizable: false, required: false}
+  nozzle_throat_mm: {unit: "mm", min: 4.0, max: 16.0, optimizable: false, required: false}
+  nozzle_exit_mm: {unit: "mm", min: 5.0, max: 20.0, optimizable: false, required: false}
+  anode_cathode_distance_mm: {unit: "mm", min: 1.0, max: 60.0, optimizable: false, required: false}
+  powder_injection_angle_deg: {unit: "deg", min: 15.0, max: 120.0, optimizable: false, required: false}
+  powder_injection_position_mm: {unit: "mm", min: 0.0, max: 200.0, optimizable: false, required: false}
+
+process_inputs:
+  arc_current_A: {unit: "A", min: 100.0, max: 1000.0, optimizable: true, required: false}
+  arc_voltage_V: {unit: "V", min: 20.0, max: 120.0, optimizable: true, required: false}
+  spray_power_kW: {unit: "kW", min: 10.0, max: 120.0, optimizable: true, required: false}
+  Ar_flow_slpm: {unit: "slpm", min: 20.0, max: 150.0, optimizable: true, required: false}
+  H2_flow_slpm: {unit: "slpm", min: 0.0, max: 25.0, optimizable: true, required: false}
+  N2_flow_slpm: {unit: "slpm", min: 0.0, max: 50.0, optimizable: true, required: false}
+  He_flow_slpm: {unit: "slpm", min: 0.0, max: 100.0, optimizable: true, required: false}
+  carrier_gas_flow_slpm: {unit: "slpm", min: 0.0, max: 15.0, optimizable: true, required: false}
+  powder_feed_g_min: {unit: "g/min", min: 5.0, max: 150.0, optimizable: true, required: false}
+  spray_distance_mm: {unit: "mm", min: 50.0, max: 250.0, optimizable: true, required: false}
+  traverse_speed_mm_s: {unit: "mm/s", min: 50.0, max: 1000.0, optimizable: true, required: false}
+
+process_states:
+  arc_voltage_fluctuation: {unit: "-", required: false}
+  jet_temperature_K: {unit: "K", required: false}
+  jet_velocity_m_s: {unit: "m/s", required: false}
+  particle_temperature_C: {unit: "degC", required: false}
+  particle_velocity_m_s: {unit: "m/s", required: false}
+  particle_flux: {unit: "-", required: false}
+
+defect_network:
+  porosity_pct: {unit: "%", required: false}
+  lamellar_gap_pct: {unit: "%", required: false}
+  unmelted_particle_pct: {unit: "%", required: false}
+  crack_density_mm_mm2: {unit: "mm/mm^2", required: false}
+  defect_connectivity_index: {unit: "0-1", required: false}
+
+performance_outputs:
+  bond_strength_MPa: {unit: "MPa", required: false}
+  hardness_HV: {unit: "HV", required: false}
+  wear_rate_mg_m: {unit: "mg/m", required: false}
+  corrosion_current_uA_cm2: {unit: "uA/cm^2", required: false}
+  cavitation_mass_loss_mg: {unit: "mg", required: false}
+  coupled_damage_rate: {unit: "a.u.", required: false}
+  deposition_efficiency_pct: {unit: "%", required: false}

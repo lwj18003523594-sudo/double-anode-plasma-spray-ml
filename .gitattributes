@@ -1,0 +1,18 @@
+# 跨平台行尾与二进制规范（Windows / macOS 共用仓库）
+# 文本文件入库统一 LF；.bat 固定 CRLF（Windows 批处理）；.command 固定 LF（macOS shell）
+* text=auto
+*.bat text eol=crlf
+*.command text eol=lf
+*.sh text eol=lf
+
+# 二进制文件不做任何转换
+*.xlsx binary
+*.xls binary
+*.csv -text
+*.joblib binary
+*.dylib binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary

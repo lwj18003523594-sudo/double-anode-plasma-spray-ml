@@ -1,0 +1,37 @@
+# V1.4 可选层定义：材料/粉末属性层 + 颗粒熔融与沉积状态层
+# 本文件由 src/modes.load_schema_for_mode 合并进各模式 Schema。
+# 两条铁律：
+#   1) 所有材料属性允许缺失；缺失不得导致原模型崩溃；
+#   2) 严禁程序凭空补全熔点/潜热/导热/密度/比热——数据没有就保持缺失，等待用户人工填写。
+material_inputs:
+  material_name: {unit: "-", categorical: true, required: false}
+  material_category: {unit: "-", categorical: true, required: false,
+                      options: [metal, alloy, oxide, ceramic, cermet, composite, other]}
+  powder_morphology: {unit: "-", categorical: true, required: false,
+                      options: [spherical, irregular, agglomerated, spray_dried, fused_crushed, other]}
+  powder_d10_um: {unit: "um", min: 0.0, max: 500.0, required: false}
+  powder_d50_um: {unit: "um", min: 0.0, max: 500.0, required: false}
+  powder_d90_um: {unit: "um", min: 0.0, max: 500.0, required: false}
+  melting_temperature_C: {unit: "degC", min: 0.0, max: 4000.0, required: false}
+  density_kg_m3: {unit: "kg/m^3", min: 500.0, max: 20000.0, required: false}
+  heat_capacity_J_kgK: {unit: "J/(kg·K)", min: 100.0, max: 2000.0, required: false}
+  thermal_conductivity_W_mK: {unit: "W/(m·K)", min: 0.5, max: 500.0, required: false}
+  latent_heat_J_kg: {unit: "J/kg", min: 1.0e4, max: 1.0e7, required: false}
+  feedstock_type: {unit: "-", categorical: true, required: false}
+
+# Stage 1.5 目标字段（颗粒熔融与沉积状态）。melting_data_source 为来源标记，不是预测目标。
+# 只有数据本身具有这些标签时才启用 Stage 1.5；没有则整层自动跳过。
+melting_states:
+  melting_state_class: {unit: "-", categorical: true, required: false,
+                        classes: [insufficiently_molten, partially_molten, fully_molten, overheated]}
+  melting_fraction_pct: {unit: "%", min: 0.0, max: 100.0, required: false}
+  melting_index: {unit: "-", min: 0.0, max: 2.0, required: false}
+  thermal_margin_C: {unit: "degC", required: false,
+                     note: "粒子温度相对熔点差值（particle_temperature_C - melting_temperature_C）。只可显示为温度差值指标，严禁称为'熔融率'；温度超过熔点不等于完全熔融。"}
+  overheating_risk: {unit: "-", min: 0.0, max: 1.0, required: false}
+  splat_state_class: {unit: "-", categorical: true, required: false,
+                      classes: [stable_splat, splash_fragmentation, incomplete_flattening, other]}
+  spread_factor: {unit: "-", min: 0.0, max: 12.0, required: false}
+  splash_fragmentation_risk: {unit: "-", min: 0.0, max: 1.0, required: false}
+  melting_data_source: {unit: "-", categorical: true, required: false, role: metadata,
+                        options: [experimental, CFD, image_analysis, literature_reported, derived_proxy]}

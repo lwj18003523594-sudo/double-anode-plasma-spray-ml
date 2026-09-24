@@ -1,0 +1,42 @@
+meta:
+  experiment_id: {unit: "-", required: true}
+  batch_id: {unit: "-", required: true}
+
+structure_inputs:
+  nozzle_throat_mm: {unit: "mm", min: 4.0, max: 12.0, optimizable: false}
+  nozzle_exit_mm: {unit: "mm", min: 6.0, max: 20.0, optimizable: false}
+  secondary_laval_length_mm: {unit: "mm", min: 0.0, max: 60.0, optimizable: false}
+  anode_spacing_mm: {unit: "mm", min: 1.0, max: 20.0, optimizable: false}
+  powder_injection_angle_deg: {unit: "deg", min: 20.0, max: 90.0, optimizable: false}
+
+process_inputs:
+  anode1_current_A: {unit: "A", min: 250.0, max: 650.0, optimizable: true}
+  anode2_current_A: {unit: "A", min: 250.0, max: 650.0, optimizable: true}
+  Ar_flow_slpm: {unit: "slpm", min: 20.0, max: 80.0, optimizable: true}
+  H2_flow_slpm: {unit: "slpm", min: 0.0, max: 20.0, optimizable: true}
+  powder_feed_g_min: {unit: "g/min", min: 10.0, max: 60.0, optimizable: true}
+  spray_distance_mm: {unit: "mm", min: 60.0, max: 160.0, optimizable: true}
+  traverse_speed_mm_s: {unit: "mm/s", min: 50.0, max: 500.0, optimizable: true}
+
+process_states:
+  arc_voltage_V: {unit: "V"}
+  jet_temperature_K: {unit: "K"}
+  jet_velocity_m_s: {unit: "m/s"}
+  particle_temperature_C: {unit: "degC"}
+  particle_velocity_m_s: {unit: "m/s"}
+
+defect_network:
+  porosity_pct: {unit: "%"}
+  lamellar_gap_pct: {unit: "%"}
+  unmelted_particle_pct: {unit: "%"}
+  crack_density_mm_mm2: {unit: "mm/mm^2"}
+  defect_connectivity_index: {unit: "0-1"}
+
+performance_outputs:
+  bond_strength_MPa: {unit: "MPa"}
+  hardness_HV: {unit: "HV"}
+  wear_rate_mg_m: {unit: "mg/m"}
+  corrosion_current_uA_cm2: {unit: "uA/cm^2"}
+  cavitation_mass_loss_mg: {unit: "mg"}
+  coupled_damage_rate: {unit: "a.u."}
+  deposition_efficiency_pct: {unit: "%"}

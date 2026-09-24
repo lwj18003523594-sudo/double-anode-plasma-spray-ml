@@ -1,0 +1,47 @@
+项目迁移清单（TRANSFER_MANIFEST）
+======================================
+项目名称：双阳极等离子喷涂智能工艺设计平台
+平台版本：V1.3.1（含 V1.3.1a UI 热修复）
+生成日期：2026-09-22 09:33
+来源系统：macOS
+目标系统：Windows
+
+数据版本：(见 models/latest_manifest.json 的 dataset_hash)
+模型版本：(见 models/latest_manifest.json 的 model_version)
+
+包含的主要目录：
+  app.py / requirements.txt / README_先看我.md
+  src/（11 个 Python 模块，含 ui_labels / paper_labels / paper_style / paper_output / research_utils）
+  config/（data_schema.yaml / objectives.yaml / data_dictionary.yaml）
+  scripts/（5 个脚本：5 个测试 + platform_check）
+  data/（Demo 数据 + 真实数据录入模板）
+  models/（latest_chain.joblib + training_domain.json + latest_manifest.json
+           + history/：全部版本 manifest 与训练域，最新版本含 model.joblib）
+  outputs/（optimization / snapshots / reports 最新 Paper_Output / 各标准子目录骨架）
+
+排除的内容：
+  .venv/（macOS 虚拟环境）
+  libomp.dylib（macOS XGBoost/OpenMP 补丁，Windows 不需要）
+  __pycache__/ .pytest_cache/ .mypy_cache/ .DS_Store/ .idea/ .workbuddy/
+  outputs/logs/（本机运行日志）
+  全部 .zip 临时产物与历史 Paper_Output 运行目录（仅保留最新）
+
+核对清单：
+  Python 推荐版本 ............ 3.11 或 3.12（3.10–3.13 亦可运行）
+  requirements.txt 存在 ...... 是
+  01_首次安装_Windows.bat .... 是
+  02_启动平台_Windows.bat .... 是
+  platform_check.py .......... 是
+  smoke_test.py .............. 是
+  leakage_test.py ............ 是
+  output_test.py ............. 是
+  usability_test.py .......... 是
+  Demo 数据 .................. 是
+  真实数据录入模板 ............ 是
+  模型文件 ................... 是
+  科研输出（论文图表包）...... 是
+  已排除 .venv ............... 是
+  已排除 libomp.dylib ........ 是
+  kaleido .................... 不需要（论文图使用 matplotlib 渲染，无 Plotly 静态导出）
+
+打包前测试状态（macOS 源项目）：smoke / leakage / output / usability 全部 PASSED。

@@ -1,0 +1,40 @@
+【双阳极等离子喷涂智能工艺设计平台】
+Windows 第一次使用方法
+
+第一步：
+将整个 ZIP 解压。
+不要在压缩包内部直接运行。
+建议解压到：D:\Research\DoubleAnode_ML
+或其他纯英文/中文正常目录。
+
+第二步：
+安装 Python 3.11 或 3.12。
+安装 Python 时勾选：Add Python to PATH
+
+第三步：
+安装并打开 Windows 版 WorkBuddy。
+选择：Coding Mode
+
+第四步：
+让 WorkBuddy 打开整个项目文件夹作为 Workspace。
+
+第五步：
+第一次运行可直接双击：01_首次安装_Windows.bat
+或者让 WorkBuddy 自动完成环境安装。
+
+第六步：
+安装完成后双击：02_启动平台_Windows.bat
+
+第七步：
+浏览器访问：http://localhost:8501
+
+第八步：
+第一次在 Windows 上建议先使用：模拟数据
+完成一次：
+数据管理 → 模型训练 → 工艺预测 → 模型解析 → 逆向设计 → 结果输出
+确认全部功能正常。
+
+特别说明：
+Windows 不使用 Mac 的 .venv。
+Windows 会重新建立自己的 .venv。
+不要复制或使用 Mac 的 libomp.dylib。

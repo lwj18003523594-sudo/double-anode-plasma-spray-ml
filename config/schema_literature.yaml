@@ -1,0 +1,14 @@
+# V1.4 通用文献数据测试模式 Schema（骨架）
+# 该模式下输入/目标变量由用户在「数据管理」页自行选择并构建运行时 Schema；
+# 本文件仅提供固定分组骨架与基础信息字段，全部允许缺省。
+meta:
+  experiment_id: {unit: "-", required: false}
+  batch_id: {unit: "-", required: false}
+  sample_id: {unit: "-", required: false}
+  replicate_id: {unit: "-", required: false}
+
+structure_inputs: {}
+process_inputs: {}
+process_states: {}
+defect_network: {}
+performance_outputs: {}

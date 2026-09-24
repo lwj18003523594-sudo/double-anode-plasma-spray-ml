@@ -1,0 +1,443 @@
+# -*- coding: utf-8 -*-
+"""V1.5 一键科研分析引擎（快速模式）。
+
+原则（spec 二十四）：自动识别但绝不盲目猜测——
+  自动识别 → 数据安全检查 → 字段映射 → 高置信度自动运行 → 只让用户确认歧义字段。
+
+隔离铁律（spec 三十一）：Quick Run 一律保存在 runs/quick_analysis/<run_id>/，
+不覆盖正式 models/；【设为正式模型】必须由用户主动确认。
+
+多 Sheet（spec 二十六）：README / Source_Metadata / Platform_* 视为元数据，
+Dataset_01 / Dataset_02 … 每个工作表独立 Run，绝不自动合并不同文献数据。
+"""
+import json
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .config import ROOT
+from .modes import MODES, load_schema_for_mode, suggest_cv
+from .literature import build_runtime_schema, MELTING_ALIAS_SUGGESTIONS
+
+QUICK_ROOT = ROOT / "runs" / "quick_analysis"
+HISTORY_FILE = QUICK_ROOT / "run_history.json"
+
+META_SHEET_KEYWORDS = ["readme", "source_metadata", "platform_field_mapping",
+                       "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata"]
+
+# 通用别名（字段名 → 规范字段），仅用于高置信度自动映射
+GENERIC_ALIAS = {
+    **{alias: f for f, aliases in MELTING_ALIAS_SUGGESTIONS.items() for alias in aliases},
+    "arc_current": "arc_current_A", "current_a": "arc_current_A",
+    "spray_distance": "spray_distance_mm", "standoff_distance_mm": "spray_distance_mm",
+    "powder_feed": "powder_feed_g_min", "feed_rate_g_min": "powder_feed_g_min",
+    "porosity": "porosity_pct", "bond_strength": "bond_strength_MPa",
+    "hardness": "hardness_HV",
+}
+
+ROLE_SECTIONS = {
+    "structure_inputs": "structure_inputs",
+    "process_inputs": "process_inputs",
+    "process_states": "process_states",
+    "defect_network": "defect_network",
+    "performance_outputs": "performance_outputs",
+    "material_inputs": "material_inputs",
+    "melting_states": "melting_states",
+}
+
+
+# ---------------- Run History ----------------
+def load_history():
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+
+def append_history(record):
+    QUICK_ROOT.mkdir(parents=True, exist_ok=True)
+    hist = load_history()
+    hist.append(record)
+    HISTORY_FILE.write_text(json.dumps(hist[-200:], ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+    return record
+
+
+def latest_runs(n=10):
+    return list(reversed(load_history()))[:n]
+
+
+def promote_to_formal(run_id, mode_id):
+    """用户主动确认后，把 Quick Run 模型设为该模式正式模型。"""
+    src = QUICK_ROOT / run_id / "model.joblib"
+    dst = ROOT / "models" / mode_id / "latest_chain.joblib"
+    if not src.exists():
+        raise FileNotFoundError(f"Quick Run 模型不存在：{src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
+
+
+# ---------------- 数据准备检查（spec 六十七） ----------------
+def data_readiness_issues(df, schema):
+    """训练前数据安全检查；返回 (critical, warning) 中文问题列表，禁止直接 traceback。"""
+    critical, warning = [], []
+    n = len(df)
+    if n == 0:
+        return ["数据表为空"], []
+    if n < 6:
+        critical.append(f"样本量过少（n={n}），无法进行交叉验证")
+    elif n < 10:
+        warning.append(f"当前数据量极少（n={n}），结果仅适合作为软件功能测试或探索性分析")
+    elif n <= 25:
+        warning.append(f"样本量较小（n={n}），建议使用 LOOCV（平台已自动选择）")
+
+    targets = []
+    for sec in ["process_states", "defect_network", "performance_outputs", "melting_states"]:
+        targets += [c for c in (schema.get(sec) or {}) if c in df.columns]
+    usable = 0
+    for t in targets:
+        s = pd.to_numeric(df[t], errors="coerce") if not hasattr(df[t], "dtype") or \
+            pd.api.types.is_numeric_dtype(df[t]) else None
+        if s is None or s.notna().sum() < 10:
+            continue
+        usable += 1
+        if s.nunique() <= 1:
+            warning.append(f"目标 {t} 为常数（无预测价值）")
+    if usable == 0:
+        crit = "未找到任何可训练目标（目标列缺失 / 非数值 / 有效值不足 10 条）"
+        critical.append(crit)
+
+    ins = [c for c in (schema.get("structure_inputs") or {}) if c in df.columns] + \
+          [c for c in (schema.get("process_inputs") or {}) if c in df.columns]
+    if not ins:
+        critical.append("未找到任何输入变量 X")
+    for c in ins:
+        s = pd.to_numeric(df[c], errors="coerce")
+        if s.isna().mean() > 0.6:
+            warning.append(f"输入 {c} 缺失率超过 60%")
+        elif s.nunique() <= 1:
+            warning.append(f"输入 {c} 为常数（对模型无信息量）")
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            warning.append(f"输入 {c} 为非数值列（已按分类处理，不进入模型特征）")
+    if "batch_id" in df.columns and df["batch_id"].nunique() < 4:
+        warning.append(f"独立批次仅 {df['batch_id'].nunique()} 个，分组交叉验证将回退 KFold/LOOCV")
+    if "experiment_id" in df.columns and df["experiment_id"].duplicated().any():
+        warning.append("experiment_id 存在重复，请核对是否为重复录入")
+    return critical, warning
+
+
+# ---------------- 字段自动识别（spec 二十七） ----------------
+def _all_canonical_fields():
+    fields = {}
+    for mode_id in MODES:
+        try:
+            sch = load_schema_for_mode(mode_id)
+        except Exception:
+            continue
+        for sec, cols in sch.items():
+            if not isinstance(cols, dict):
+                continue
+            for c, spec in cols.items():
+                fields.setdefault(c, {"role": sec, "categorical": bool(spec.get("categorical")),
+                                      "modes": []})
+                fields[c]["modes"].append(mode_id)
+    return fields
+
+
+def detect_mode(df):
+    """根据列名与四种模式 Schema 的重合度判断研究模式（高置信度才自动，否则 literature）。"""
+    cols = set(df.columns)
+    scores = {}
+    for mode_id in MODES:
+        try:
+            sch = load_schema_for_mode(mode_id)
+        except Exception:
+            continue
+        known = set()
+        for sec in ["structure_inputs", "process_inputs"]:
+            known |= {c for c in (sch.get(sec) or {}) if not (sch[sec][c].get("categorical"))}
+        hit = len(cols & known)
+        scores[mode_id] = hit / max(1, len(known)) if known else 0
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 0.5 else "literature", scores
+
+
+def infer_field_map(df):
+    """自动字段映射：返回 schema 选择 + 歧义清单。
+
+    高置信度（列名与规范字段精确一致，或命中别名表）→ 自动；
+    其余数值列 → 歧义（可能为 X / Y / 材料），交由用户确认。
+    """
+    canon = _all_canonical_fields()
+    low = {str(c).lower().strip(): c for c in df.columns}
+    sel = {"x": [], "states": [], "defects": [], "performance": [],
+           "material": [], "melting_map": {}}
+    ambiguous = {}
+    used = set()
+    for col in df.columns:
+        key = str(col).lower().strip()
+        if key in canon:
+            role = canon[key]["role"]
+            target = {"structure_inputs": "x", "process_inputs": "x",
+                      "process_states": "states", "defect_network": "defects",
+                      "performance_outputs": "performance",
+                      "material_inputs": "material"}.get(role)
+            if target == "x" and canon[key]["categorical"]:
+                used.add(col)
+                continue
+            if target:
+                sel[target].append(col)
+                used.add(col)
+            elif role == "melting_states":
+                sel["melting_map"][key] = col
+                used.add(col)
+            continue
+        alias = GENERIC_ALIAS.get(key)
+        if alias and alias in df.columns:
+            used.add(col)
+            continue
+        if alias and alias in canon:
+            role = canon[alias]["role"]
+            if role == "melting_states":
+                sel["melting_map"][alias] = col
+            else:
+                target = {"structure_inputs": "x", "process_inputs": "x",
+                          "process_states": "states", "defect_network": "defects",
+                          "performance_outputs": "performance",
+                          "material_inputs": "material"}.get(role)
+                if target:
+                    sel[target].append(alias if alias in df.columns else col)
+            used.add(col)
+            continue
+        # 未知数值列 → 歧义
+        if pd.api.types.is_numeric_dtype(df[col]):
+            ambiguous[col] = "可能是输入 X / 目标 Y / 材料属性"
+    return sel, ambiguous
+
+
+def read_objective_directions(sheets_df):
+    """从元数据表读取 optimize 方向（maximize/minimize/prediction_only）。没有 → 全部 prediction_only。"""
+    directions = {}
+    for name, df in (sheets_df or {}).items():
+        low = str(name).lower()
+        if not any(k in low for k in META_SHEET_KEYWORDS):
+            continue
+        for _, row in df.iterrows():
+            cells = [str(v).strip().lower() for v in row.values if pd.notna(v)]
+            for i, cell in enumerate(cells):
+                if cell in ("maximize", "minimize", "prediction_only"):
+                    # 找同行里像字段名的单元格（含下划线/字母）
+                    for other in cells:
+                        if other not in ("maximize", "minimize", "prediction_only") \
+                                and ("_" in other or other.replace(".", "").isalpha()) and len(other) > 3:
+                            directions[other] = cell
+                            break
+    return directions
+
+
+# ---------------- 一键编排（spec 二十五/三十/六十五） ----------------
+def classify_sheets(sheet_names):
+    data, meta = [], []
+    for sn in sheet_names:
+        low = str(sn).lower()
+        if any(k in low for k in META_SHEET_KEYWORDS):
+            meta.append(sn)
+        else:
+            data.append(sn)
+    return data, meta
+
+
+def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
+                       progress_cb=None, demo=False):
+    """对单个数据表执行一键科研分析（分步容错，单步失败不丢失其他结果）。
+
+    返回 summary dict：run_id / mode / steps(状态) / schema / bundle / paths / record。
+    模型保存于 runs/quick_analysis/<run_id>/model.joblib，绝不写入正式 models/。
+    """
+    from .model_chain import train_chain_full, predict_chain
+    from .paper_output import PaperExporter
+    from . import insights as insight_mod
+    from . import figure_analysis as fa
+
+    run_id = run_id or ("QA_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    run_dir = QUICK_ROOT / run_id
+    results_dir = run_dir / "results"
+    steps = []  # (名称, 状态, 原因)  状态: done/skip/fail
+
+    def step(name, fn, skippable=False, skip_reason=None):
+        if skippable and skip_reason:
+            steps.append((name, "skip", skip_reason))
+            if progress_cb:
+                progress_cb(name, "skip", skip_reason)
+            return None
+        if progress_cb:
+            progress_cb(name, "running", "")
+        try:
+            out = fn()
+            steps.append((name, "done", ""))
+            if progress_cb:
+                progress_cb(name, "done", "")
+            return out
+        except Exception as e:
+            steps.append((name, "fail", str(e)))
+            if progress_cb:
+                progress_cb(name, "fail", str(e))
+            from .research_utils import log_event
+            log_event("quick_analysis_error", f"run={run_id} step={name}: {e}")
+            return None
+
+    # ② 数据准备检查
+    mode_id, scores = detect_mode(df)
+    sel, ambiguous = infer_field_map(df)
+    if confirm_map:  # 用户确认歧义字段：{col: "x"/"performance"/"material"/"ignore"}
+        for col, role in confirm_map.items():
+            if role in ("x", "performance", "material", "defects", "states") and col in df.columns:
+                sel[role].append(col)
+            ambiguous.pop(col, None)
+
+    schema = None
+
+    def _build_schema():
+        nonlocal schema
+        if mode_id == "literature":
+            schema = build_runtime_schema(df, sel)
+        else:
+            schema = load_schema_for_mode(mode_id)
+        critical, warning = data_readiness_issues(df, schema)
+        if critical:
+            raise RuntimeError("数据准备检查未通过：" + "；".join(critical))
+        return {"critical": critical, "warning": warning}
+
+    check = step("数据读取与检查", lambda: None)  # ①
+    check = step("数据准备检查", _build_schema)
+    if schema is None:
+        return _finish(run_id, mode_id, steps, None, None, {}, sheet_name, demo, failed=True)
+
+    # ④ 训练（Quick Run 模型目录，不覆盖正式模型）
+    bundle = {}
+    def _train():
+        p = run_dir / "model.joblib"
+        b = train_chain_full(df, schema, p, n_splits=None)
+        bundle.update(b)
+        return b
+    step("模型训练（保存于 runs/quick_analysis，不影响正式模型）", _train)
+    if not bundle:
+        return _finish(run_id, mode_id, steps, None, None, {}, sheet_name, demo, failed=True)
+
+    # ⑥ 模型解释 + 熔融状态（信息汇总）
+    def _explain():
+        factors, stability = insight_mod.model_key_factors(bundle)
+        return {"factors": {k: v.head(8).to_dict() for k, v in factors.items()},
+                "stability": stability}
+    explain = step("模型解释（特征重要性 / 跨折稳定性）", _explain)
+
+    # ⑦ 熔融状态分析（未启用自动跳过）
+    melt_info = {"enabled": bool(bundle.get("stage15_enabled"))}
+    step("熔融状态分析", lambda: melt_info,
+         skippable=not bundle.get("stage15_enabled"),
+         skip_reason="当前数据缺少颗粒熔融状态标签，Stage 1.5 自动跳过")
+
+    # ⑧ Pareto（仅当方向已定义；禁止自动认定优化方向）
+    pareto_result = {}
+    directions = confirm_map.get("_directions") if isinstance(confirm_map, dict) else None
+    objectives = {c: d for c, d in (directions or {}).items()
+                  if d in ("maximize", "minimize")
+                  and c in (schema.get("performance_outputs") or schema.get("defect_network") or {})}
+    if not objectives:
+        # 默认全部 prediction_only：跳过 Pareto（spec 二十九）
+        step("多目标优化（Pareto）", lambda: None, skippable=True,
+             skip_reason="当前数据未定义优化目标方向（prediction_only），未执行自动多目标优化")
+    else:
+        def _pareto():
+            from .optimize import random_pareto_search
+            from .config import load_objectives
+            obj_cfg = {"objectives": objectives, "constraints": {}}
+            dom = bundle.get("training_domain") or {}
+            fixed = {c: dom[c]["median"] for c in (schema.get("structure_inputs") or {})
+                     if c in dom}
+            front, stats = random_pareto_search(bundle, schema, obj_cfg,
+                                                fixed_values=fixed,
+                                                n_candidates=1200, return_stats=True)
+            pareto_result.update({"front": front, "stats": stats})
+            return stats
+        step("多目标优化（Pareto）", _pareto)
+
+    # ⑨ 数据洞察 + ⑩ 图表与结果包
+    def _insights():
+        from .context import build_context
+        ctx = build_context(mode_id, "文献数据（快速分析）", df=df, bundle=bundle,
+                            active_run_id=run_id)
+        ctx["_demo"] = demo
+        md, xlsx = insight_mod.build_insight_report(ctx, df, schema, bundle,
+                                                    results_dir / "insights")
+        return {"report": str(md), "evidence": str(xlsx)}
+    insight_out = step("数据洞察", _insights)
+
+    def _package():
+        prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
+        ex = PaperExporter(df, schema, bundle, lang="zh", formats=("png",),
+                           demo=demo, prefix=prefix, run_dir=results_dir)
+        run_d, zip_p, paths = ex.build_bundle(n_candidates=800)
+        return {"run_dir": str(run_d), "zip": str(zip_p),
+                "figures": len(paths.get("figures", [])),
+                "analysis_dir": str(run_d / "analysis")}
+    pkg = step("科研图表与结果输出", _package)
+
+    return _finish(run_id, mode_id, steps, bundle, schema,
+                   {"explain": explain, "insight": insight_out, "package": pkg,
+                    "pareto": pareto_result, "warnings": (check or {}).get("warning", [])},
+                   sheet_name, demo)
+
+
+def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo, failed=False):
+    record = {
+        "run_id": run_id,
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "research_mode": mode_id,
+        "data_source": "quick_analysis",
+        "sheet": sheet_name,
+        "dataset_version": ("auto_" + str(bundle.get("dataset_hash"))[:8]) if bundle else None,
+        "model_version": bundle.get("model_version") if bundle else None,
+        "targets": list((bundle or {}).get("stage3_models", {}).keys())[:8],
+        "validation_method": ((bundle or {}).get("chain_cv") or {}).get("method"),
+        "stage15": bool((bundle or {}).get("stage15_enabled")),
+        "result_path": str(QUICK_ROOT / run_id),
+        "failed": failed,
+    }
+    if not failed:
+        append_history(record)
+    summary = {"run_id": run_id, "mode": mode_id, "steps": steps, "record": record,
+               "bundle": bundle, "schema": schema, **extras}
+    return summary
+
+
+def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=False):
+    """对整个 Excel/CSV 执行快速分析：多数据 Sheet → 多个独立 Run（绝不合并）。"""
+    from .literature import list_sheets, load_sheet
+    name = str(getattr(file_or_path, "name", file_or_path)).lower()
+    if name.endswith(".csv"):
+        sheets = {"CSV": pd.read_csv(file_or_path)}
+        sheet_names = ["CSV"]
+    else:
+        sheet_names = list_sheets(file_or_path)
+        data_sheets, _meta = classify_sheets(sheet_names)
+        sheets = {}
+        meta_frames = {sn: pd.read_excel(file_or_path, sheet_name=sn) for sn in _meta}
+        for sn in data_sheets:
+            sheets[sn] = pd.read_excel(file_or_path, sheet_name=sn)
+    directions = read_objective_directions(meta_frames if name.endswith((".xlsx", ".xls")) else {})
+    results = []
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for i, (sn, df) in enumerate(sheets.items()):
+        rid = f"{run_prefix or 'QA'}_{ts}_{i+1:02d}"
+        confirm = {"_directions": directions} if directions else None
+        res = run_quick_analysis(df, sheet_name=sn, run_id=rid,
+                                 confirm_map=confirm, progress_cb=progress_cb, demo=demo)
+        results.append(res)
+    return results

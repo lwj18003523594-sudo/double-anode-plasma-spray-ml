@@ -1,0 +1,55 @@
+# V1.4 传统大气等离子喷涂（APS）模式 Schema
+# 适用于：传统单阴极/单阳极 APS、普通 APS 文献数据、传统喷涂实验数据。
+# 注意：APS 的 arc_current_A 严禁自动映射为 anode1_current_A（两种工艺体系相互独立）。
+# 除 meta 外全部字段允许缺省（文献数据不要求每篇都有全部参数）。
+meta:
+  experiment_id: {unit: "-", required: false}
+  batch_id: {unit: "-", required: false}
+  sample_id: {unit: "-", required: false}
+  replicate_id: {unit: "-", required: false}
+
+structure_inputs:
+  torch_type: {unit: "-", required: false, categorical: true}
+  nozzle_throat_mm: {unit: "mm", min: 4.0, max: 14.0, optimizable: false, required: false}
+  nozzle_exit_mm: {unit: "mm", min: 5.0, max: 16.0, optimizable: false, required: false}
+  electrode_pair_count: {unit: "-", min: 1.0, max: 4.0, optimizable: false, required: false}
+
+process_inputs:
+  arc_current_A: {unit: "A", min: 200.0, max: 900.0, optimizable: true, required: false}
+  arc_voltage_V: {unit: "V", min: 20.0, max: 90.0, optimizable: true, required: false}
+  spray_power_kW: {unit: "kW", min: 10.0, max: 90.0, optimizable: true, required: false}
+  Ar_flow_slpm: {unit: "slpm", min: 20.0, max: 120.0, optimizable: true, required: false}
+  H2_flow_slpm: {unit: "slpm", min: 0.0, max: 25.0, optimizable: true, required: false}
+  N2_flow_slpm: {unit: "slpm", min: 0.0, max: 40.0, optimizable: true, required: false}
+  He_flow_slpm: {unit: "slpm", min: 0.0, max: 80.0, optimizable: true, required: false}
+  carrier_gas_flow_slpm: {unit: "slpm", min: 0.0, max: 15.0, optimizable: true, required: false}
+  powder_feed_g_min: {unit: "g/min", min: 5.0, max: 150.0, optimizable: true, required: false}
+  spray_distance_mm: {unit: "mm", min: 50.0, max: 200.0, optimizable: true, required: false}
+  traverse_speed_mm_s: {unit: "mm/s", min: 50.0, max: 1000.0, optimizable: true, required: false}
+  substrate_rpm: {unit: "rpm", min: 0.0, max: 2000.0, optimizable: true, required: false}
+  spray_angle_deg: {unit: "deg", min: 30.0, max: 120.0, optimizable: true, required: false}
+
+process_states:
+  jet_temperature_K: {unit: "K", required: false}
+  jet_velocity_m_s: {unit: "m/s", required: false}
+  particle_temperature_C: {unit: "degC", required: false}
+  particle_velocity_m_s: {unit: "m/s", required: false}
+  particle_diameter_um: {unit: "um", required: false}
+
+defect_network:
+  porosity_pct: {unit: "%", required: false}
+  lamellar_gap_pct: {unit: "%", required: false}
+  unmelted_particle_pct: {unit: "%", required: false}
+  crack_density_mm_mm2: {unit: "mm/mm^2", required: false}
+  oxide_content_pct: {unit: "%", required: false}
+  defect_connectivity_index: {unit: "0-1", required: false}
+
+performance_outputs:
+  bond_strength_MPa: {unit: "MPa", required: false}
+  hardness_HV: {unit: "HV", required: false}
+  wear_rate_mg_m: {unit: "mg/m", required: false}
+  corrosion_current_uA_cm2: {unit: "uA/cm^2", required: false}
+  cavitation_mass_loss_mg: {unit: "mg", required: false}
+  coupled_damage_rate: {unit: "a.u.", required: false}
+  deposition_efficiency_pct: {unit: "%", required: false}
+  thermal_conductivity_coating_W_mK: {unit: "W/mK", required: false}

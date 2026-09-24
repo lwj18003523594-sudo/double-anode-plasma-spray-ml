@@ -1,0 +1,38 @@
+你现在接管一个已经生成好的本地 Python 科研项目：DoubleAnode_ML_Foolproof。
+
+请先完整阅读 README_先看我.md、config/data_schema.yaml、config/objectives.yaml 以及 src/ 目录中的代码。
+不要推翻现有架构，不要把全部代码重写到 app.py。
+
+项目研究主线固定为：
+
+双阳极结构/工艺参数
+→ 射流与粒子状态
+→ 涂层缺陷网络
+→ 涂层服役性能
+→ 数据驱动逆向工艺设计
+
+你的任务是：
+1. 检查 requirements.txt 并创建本地虚拟环境；
+2. 安装依赖；
+3. 运行内置 DEMO 数据；
+4. 检查“一键训练 → 单点预测 → Pareto 逆向优化”是否可以完整运行；
+5. 如果出现报错，直接定位并修复；
+6. 保留 batch_id 分组交叉验证和 OOF 机制，禁止为了跑通代码而删除；
+7. 保持真实数据模板的表头兼容；
+8. 成功后启动 Streamlit：
+   streamlit run app.py
+9. 以后我给你新的真实实验 Excel 时，只允许通过配置文件和模块化代码扩展，不允许破坏已有数据格式。
+10. 下一阶段扩展优先级：
+   a. SHAP summary / dependence / interaction；
+   b. PDP；
+   c. 模型版本管理；
+   d. 主动学习推荐下一组实验；
+   e. NSGA-II 或贝叶斯多目标优化；
+   f. 自动生成论文级图表与结果报告。
+
+特别注意：
+- DEMO 数据只能测试软件功能，不允许输出任何真实物理结论。
+- 同一 batch_id 的数据不能同时进入交叉验证训练和验证部分。
+- Stage 2 必须使用 Stage 1 的 OOF 预测结果训练。
+- Stage 3 必须使用前级 OOF 结果，避免信息泄漏。
+- 任何模型性能必须同时显示 R2、RMSE、MAE。
