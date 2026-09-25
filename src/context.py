@@ -124,3 +124,41 @@ def context_detail_lines(ctx):
         f"active_run_id：{ctx.get('active_run_id') or '—'}",
         f"状态时间：{ctx.get('timestamp')}",
     ]
+
+
+# ---------------- V1.6：状态徽标辅助（P0-7 / P1-2，与 ③⑧ 同源只读） ----------------
+def context_cv_short(ctx) -> str:
+    """CV 方式短标签：GroupKFold / LOOCV / KFold / —（界面显示专用）。"""
+    validation = ctx.get("validation_method")
+    s = str(validation or "")
+    if "GroupKFold" in s:
+        return "GroupKFold"
+    if "LOOCV" in s:
+        return "LOOCV"
+    if "KFold" in s:
+        return "KFold"
+    return "—"
+
+
+def context_pill_text(ctx) -> str:
+    """Tab 顶部 status-pill 文本（全部读 build_context 产物，禁止二次计算）。
+
+    示例：『✓ 数据已加载 · n=45 · 数据版本 auto_xxxx · ✓ 模型已训练 · CV: GroupKFold』
+    首页 / ③ / ⑧ 使用同一 CTX，显示结果完全一致（P1-2 验收）。
+    """
+    parts = []
+    if ctx.get("dataset_loaded"):
+        n = ctx.get("record_count")
+        parts.append("✓ 数据已加载" + (f" · n={n}" if n is not None else ""))
+        if ctx.get("dataset_version"):
+            parts.append(f"数据版本 {ctx['dataset_version']}")
+    else:
+        parts.append("数据未加载")
+    if ctx.get("model_trained"):
+        parts.append("✓ 模型已训练")
+        parts.append(f"CV: {context_cv_short(ctx)}")
+        if ctx.get("model_version"):
+            parts.append(f"模型版本 {str(ctx['model_version']).split('_')[-1]}")
+    else:
+        parts.append("模型未训练")
+    return " ｜ ".join(parts)

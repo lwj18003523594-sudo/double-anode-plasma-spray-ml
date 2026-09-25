@@ -174,3 +174,41 @@ def zh_df(df, columns=None):
     cols = list(columns) if columns is not None else list(df.columns)
     rename = {c: zh(c) for c in cols if c in COLUMN_LABELS}
     return df.rename(columns=rename)
+
+
+# ---- V1.6：各 Tab 一句话导语文案表（P0-7 验收 1，app.py render_tab_header 使用） ----
+TAB_INTROS = {
+    "tab0": "研究主线与智能工作流入口：① 导入数据 → ② 一键分析 → ③ 查看可溯源结论。",
+    "tab1": "上传 / 检查数据：字段校验、完整度与重复性统计；异常字段将首屏提示。",
+    "tab2": "三级链式代理模型训练：OOF 防泄漏 + 按喷涂批次分组交叉验证。",
+    "tab3": "单组工艺参数全链预测：结构/工艺 → 射流与粒子状态 → 缺陷 → 性能。",
+    "tab4": "模型解析：特征重要性 / SHAP / PDP / 不确定性与 Stage 1.5 熔融分析。",
+    "tab5": "数据洞察与实验反馈：三源分级（直接观测 / 模型推断 / 优化建议）。",
+    "tab6": "多目标工艺逆向设计：Pareto 非支配搜索 + 工程约束 + 数据支持度标注。",
+    "tab7": "科研结果输出：A–I 全套论文图表 / 表格 / 数据 / 元数据与结果包 ZIP。",
+}
+
+# ---- V1.6：首页智能操作区文案（P0-1 / P1-3） ----
+SMART_HUB = {
+    "title": "智能操作区 Smart Actions",
+    "btn_import": "⬆ 智能一键导入",
+    "btn_import_hint": "拖入 Excel / CSV · 自动识别字段 · 逐表独立运行",
+    "btn_analyze": "✦ 智能分析",
+    "btn_analyze_hint": "一键生成结论摘要 · 每条结论可溯源",
+    "btn_analyze_empty": "✦ 智能分析（请先导入数据）",
+    "empty_guide": "当前还没有可分析的数据——请先点击左侧「智能一键导入」上传 Excel / CSV 文件。",
+    "ready_hint": "已识别到待分析文件，点击即可一键生成结果。",
+    "result_hint": "已生成最新运行结果，点击刷新摘要卡。",
+    "steps": ["① 导入数据", "② 一键分析", "③ 查看结论"],
+}
+
+# ---- V1.6：证据徽标 / 溯源相关标签（P0-2） ----
+EVIDENCE_LABELS = {
+    "direct": "[直接数据]",
+    "model": "[模型推断]",
+    "meta": "[数据来源]",
+    "detail_title": "证据详情",
+    "legacy_notice": "旧版运行，无溯源数据（该 run 生成于 V1.5 之前，无 evidence_manifest）。",
+    "demo_notice": "【演示数据】模拟数据，不可用于正式科研结论。",
+    "degraded_note": "该结论因引用度量缺失已降级（未输出套话）。",
+}

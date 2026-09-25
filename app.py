@@ -17,29 +17,27 @@ from src.research_utils import (model_staleness, log_event, classify_support,
                                 replicate_stats, dataset_hash as df_dataset_hash,
                                 pareto_row_support)
 from src.ui_labels import (COLUMN_LABELS, STAGE_LABELS, STAGE_FULL_LABELS,
-                           MODEL_KIND_LABELS, QUALITY_LABELS, zh, zh_short, zh_df)
+                           MODEL_KIND_LABELS, QUALITY_LABELS, zh, zh_short, zh_df,
+                           TAB_INTROS, SMART_HUB, EVIDENCE_LABELS)
 from src.modes import (MODES, DEFAULT_MODE, load_schema_for_mode, data_dir, data_file,
                        model_path as mode_model_path, output_prefix, suggest_cv,
                        MELTING_CLASS_ZH)
 from src.literature import (list_sheets, pick_default_sheet, load_sheet,
                             suggest_melting_mapping, build_runtime_schema,
                             default_objectives_for)
-from src.context import build_context, context_status_items, context_detail_lines
+from src.context import (build_context, context_status_items, context_detail_lines,
+                         context_pill_text, context_cv_short)
 from src import insights as insight_mod
 from src import quick_analysis as qa
 from src.figure_analysis import analyze_figure
+from src import plot_style as pstyle          # V1.6：网页图表样式唯一来源
+from src import evidence as evidence_mod      # V1.6：全程可溯源（P0-2）
 
 st.set_page_config(page_title="双阳极等离子喷涂智能工艺设计平台", layout="wide")
 
-# V1.5：网页图表统一字体（英文/数字 Times New Roman，中文宋体系衬线；
-# 论文图字体由 paper_style.py 独立管理，不受此设置影响）
-import plotly.io as pio
-_web_font = 'Times New Roman, "Songti SC", SimSun, STSong, "Noto Serif CJK SC", serif'
-_tpl = pio.templates["plotly_white"]
-_tpl.layout.font.family = _web_font
-_tpl.layout.font.size = 13
-_tpl.layout.title.font.size = 19
-pio.templates.default = "plotly_white"
+# V1.6（P0-4）：网页图表统一 Nature 模板（白底、衬线字体、同源色板、中性灰网格）。
+# 色板与模板唯一注册处为 src/plot_style.py，替代 V1.5 的手工 template 设置。
+pstyle.register_nature_template()
 
 DEMO = ROOT / "data" / "demo" / "DEMO_双阳极喷涂数据.xlsx"
 PARETO_OUT = ROOT / "outputs" / "optimization" / "Pareto_工艺优化结果.xlsx"
@@ -73,13 +71,32 @@ if MODE_ID == "literature" and st.session_state.get("lit_objectives"):
 grp = groups(schema)
 use_demo = USE_DEMO  # 兼容既有 DEMO 提示逻辑
 
-# ---------------- V1.5 全局样式：宋体 + Times New Roman · 淡雅科研风（白底 + 淡蓝/淡樱花粉点缀） ----------------
-st.markdown("""<style>
+# ---------------- V1.6 全局样式：宋体 + Times New Roman · Nature 淡雅科研风 ----------------
+# 色板唯一定义处 src/plot_style.py：hex 只经 _CSS_VARS 注入，CSS 主体一律 var(--*) 引用。
+_CSS_VARS = f"""
+:root {{
+  --gray-ink: {pstyle.GRAY_INK};
+  --gray-muted: {pstyle.GRAY_MUTED};
+  --gray-border: {pstyle.GRAY_BORDER};
+  --gray-paper: {pstyle.GRAY_PAPER};
+  --gray-ref: {pstyle.GRAY_REF};
+  --blue-signal: {pstyle.BLUE_SIGNAL};
+  --blue-mid: {pstyle.BLUE_MID};
+  --blue-light: {pstyle.BLUE_LIGHT};
+  --blue-faint: {pstyle.BLUE_FAINT};
+  --pink-accent: {pstyle.PINK_ACCENT};
+  --pink-mid: {pstyle.PINK_MID};
+  --pink-light: {pstyle.PINK_LIGHT};
+  --sem-good: {pstyle.SEM_GOOD};
+  --sem-bad: {pstyle.SEM_BAD};
+}}
+"""
+_CSS_BODY = """
 /* 字体：英文/数字命中 Times New Roman，中文回落宋体系衬线（不打包字体文件，缺失自动回退） */
 html, body, [class*="css"], .stApp, .stApp * {
-  font-family: "Times New Roman", "Songti SC", "SimSun", "STSong", "Noto Serif CJK SC", serif !important;
+  font-family: "Times New Roman", "Songti SC", "SimSun", STSong, "Noto Serif CJK SC", serif !important;
 }
-html, body, .stApp {background:#FAFBFC; color:#2F3440;}
+html, body, .stApp {background:var(--gray-paper); color:var(--gray-ink);}
 /* V1.5 Bug 修复：全局隐藏 Material 图标连字（键盘双箭头/展开/菜单/上传等图标在
    字体未加载时会泄漏英文原文并出现重复残片），全部改用平台 Unicode/原生控件 */
 span[data-testid="stIconMaterial"], svg[data-testid="stIconMaterial"] { display: none !important; }
@@ -87,70 +104,110 @@ span[data-testid="stIconMaterial"], svg[data-testid="stIconMaterial"] { display:
 footer {visibility: hidden;}
 
 /* 字号层级（V1.5 spec 九）：主标题 30–32，二级 23–25，模块 18–20，正文 15–16，辅助 13–14 */
-h1 {font-size: clamp(26px, 2.6vw, 32px) !important; font-weight: 700 !important; color:#2F3440 !important;}
-h2 {font-size: clamp(20px, 2.2vw, 25px) !important; font-weight: 700 !important; color:#2F3440 !important;}
-h3 {font-size: clamp(17px, 1.8vw, 20px) !important; font-weight: 600 !important; color:#2F3440 !important;}
-p, li, .stMarkdown {font-size: 15.5px; line-height: 1.6; text-align: left; color:#2F3440;}
-.stCaption, p.caption, small {font-size: 13.5px !important; line-height: 1.5; color:#7A8290;}
+h1 {font-size: clamp(26px, 2.6vw, 32px) !important; font-weight: 700 !important; color:var(--gray-ink) !important;}
+h2 {font-size: clamp(20px, 2.2vw, 25px) !important; font-weight: 700 !important; color:var(--gray-ink) !important;}
+h3 {font-size: clamp(17px, 1.8vw, 20px) !important; font-weight: 600 !important; color:var(--gray-ink) !important;}
+p, li, .stMarkdown {font-size: 15.5px; line-height: 1.6; text-align: left; color:var(--gray-ink);}
+.stCaption, p.caption, small {font-size: 13.5px !important; line-height: 1.5; color:var(--gray-muted);}
 .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {text-align: left;}
 
-/* 按钮（spec 十三）：普通白底浅灰边框，hover 极淡蓝；primary 极淡蓝 */
+/* 按钮（spec 十三）：普通白底浅灰边框，hover 极淡蓝；其余动作按钮一律白底描边 */
 .stButton > button, button[data-testid="stBaseButton-secondary"] {
-  background:#FFFFFF; color:#2F3440; border:1px solid #E5E9EF;
+  background:#FFFFFF; color:var(--gray-ink); border:1px solid var(--gray-border);
   border-radius:8px; font-size:15px; padding:6px 16px;
 }
 .stButton > button:hover, button[data-testid="stBaseButton-secondary"]:hover {
-  background:#EAF3FB; border-color:#A9C9E5; color:#2F3440;
+  background:var(--blue-faint); border-color:var(--blue-light); color:var(--gray-ink);
 }
+/* V1.6（P0-1）：primary = 智能操作区专属——全站唯一实底强调按钮（其余按钮已全部降为
+   白底描边 secondary）；高 ≥56px、PINK_ACCENT 实底白字 18px、占满所在列宽 */
 button[data-testid="stBaseButton-primary"], .stButton > button[kind="primary"] {
-  background:#EAF3FB !important; color:#3D5A78 !important;
-  border:1px solid #A9C9E5 !important; border-radius:8px; font-size:15px;
+  min-height:58px !important; width:100%;
+  background:var(--pink-accent) !important; color:#FFFFFF !important;
+  border:none !important; border-radius:12px; font-size:18px !important; font-weight:700;
+  box-shadow:0 2px 6px rgba(47,52,64,0.10); white-space:normal; line-height:1.35;
 }
-button[data-testid="stBaseButton-primary"]:hover {background:#DCEBF8 !important;}
+button[data-testid="stBaseButton-primary"]:hover, .stButton > button[kind="primary"]:hover {
+  background:var(--pink-mid) !important; color:#FFFFFF !important;
+}
+button[data-testid="stBaseButton-primary"]:disabled {opacity:0.6;}
+
+/* V1.6（P0-1）：智能操作区——首页第一视觉；两键为全站唯一实底强调按钮（见上方 primary 规则） */
+.smart-hub-title {font-size:20px; font-weight:700; color:var(--gray-ink);
+  border-left:4px solid var(--pink-accent); padding-left:12px; margin:4px 0 12px 0;}
+.smart-btn-sub {font-size:13px; color:var(--gray-muted); margin-top:4px; text-align:center;}
+
+/* V1.6（P1-3）：三步指示器 */
+.step-wrap {display:flex; align-items:center; justify-content:center; gap:0;
+  margin:12px 0 4px 0; flex-wrap:wrap;}
+.step-node {padding:5px 16px; border-radius:999px; font-size:14px; font-weight:600;
+  border:1px solid var(--gray-border); color:var(--gray-muted); background:#FFFFFF;}
+.step-arrow {color:var(--gray-ref); margin:0 10px; font-size:16px;}
+.step-node.active {border-color:var(--blue-signal); color:var(--blue-signal);
+  background:var(--blue-faint);}
+.step-node.done {border-color:var(--blue-signal); color:#FFFFFF; background:var(--blue-signal);}
+.step-node.fail {border-color:var(--sem-bad); color:var(--sem-bad); background:#FFF5F6;}
+.step-msg {font-size:13px; color:var(--gray-muted); text-align:center; margin:4px 0 8px 0;}
+
+/* V1.6（P0-2）：证据徽标 / Demo 横幅 / 摘要卡 */
+.ev-badge {display:inline-block; padding:2px 10px; border-radius:6px;
+  font-size:12.5px; font-weight:600; white-space:nowrap; vertical-align:middle;}
+.demo-banner {background:var(--pink-light); color:var(--pink-accent);
+  border:1px solid var(--pink-mid); border-radius:8px; padding:8px 14px;
+  font-size:14px; font-weight:600; margin:8px 0;}
+.sum-card {background:#FFFFFF; border:1px solid var(--gray-border);
+  border-top:3px solid var(--pink-accent); border-radius:10px;
+  padding:16px 20px; margin:12px 0; box-shadow:0 1px 3px rgba(47,52,64,0.06);}
+.sum-card .sum-head {display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center;
+  font-size:14px; color:var(--gray-ink); margin-bottom:8px;}
+.sum-card .sum-title {font-size:17px; font-weight:700; color:var(--gray-ink);}
 
 /* 研究主线卡片（spec 十二）：白底 + 3px 顶部色带，淡蓝/淡樱花粉交替；不裁切文字 */
 .flow-wrap {display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; margin:12px 0 6px 0;}
-.flow-card {flex:1 1 150px; min-width:0; background:#FFFFFF; border:1px solid #E5E9EF;
-  border-top:3px solid #A9C9E5; border-radius:10px; padding:16px 12px; text-align:center;
+.flow-card {flex:1 1 150px; min-width:0; background:#FFFFFF; border:1px solid var(--gray-border);
+  border-top:3px solid var(--blue-light); border-radius:10px; padding:16px 12px; text-align:center;
   box-shadow:0 1px 3px rgba(47,52,64,0.06);}
-.flow-card:nth-child(4n+1), .flow-card:nth-child(4n+3) {border-top-color:#A9C9E5;}
-.flow-card:nth-child(4n+2), .flow-card:nth-child(4n+4) {border-top-color:#E8B8C0;}
-.flow-card h4 {margin:0 0 8px 0; font-size:17px; color:#2F3440; font-weight:700;
+.flow-card:nth-child(4n+1), .flow-card:nth-child(4n+3) {border-top-color:var(--blue-light);}
+.flow-card:nth-child(4n+2), .flow-card:nth-child(4n+4) {border-top-color:var(--pink-light);}
+.flow-card h4 {margin:0 0 8px 0; font-size:17px; color:var(--gray-ink); font-weight:700;
   white-space:normal; word-break:break-word; line-height:1.4;}
-.flow-card p {margin:2px 0; font-size:13.5px; color:#7A8290; line-height:1.6;}
-.flow-arrow {display:flex; align-items:center; font-size:20px; color:#A9C9E5; padding:0 2px; flex:0 0 auto;}
-.obj-card {background:#FFFFFF; border:1px solid #E5E9EF; border-left:3px solid #E8B8C0;
+.flow-card p {margin:2px 0; font-size:13.5px; color:var(--gray-muted); line-height:1.6;}
+.flow-arrow {display:flex; align-items:center; font-size:20px; color:var(--blue-light); padding:0 2px; flex:0 0 auto;}
+.obj-card {background:#FFFFFF; border:1px solid var(--gray-border); border-left:3px solid var(--pink-light);
   border-radius:10px; padding:16px 12px; text-align:center; box-shadow:0 1px 3px rgba(47,52,64,0.06);}
-.obj-card .name {font-size:17px; font-weight:700; color:#2F3440;}
-.obj-card .dir {font-size:14px; margin-top:4px; color:#7A8290; font-weight:600;}
+.obj-card .name {font-size:17px; font-weight:700; color:var(--gray-ink);}
+.obj-card .dir {font-size:14px; margin-top:4px; color:var(--gray-muted); font-weight:600;}
 
 /* 状态徽标与状态栏（淡雅浅色） */
 .status-pill {display:inline-block; padding:3px 14px; border-radius:999px; font-size:14px; font-weight:600;}
 [data-testid="stExpander"] summary span[data-testid="stIconMaterial"],
 [data-testid="stExpander"] summary svg[data-testid="stIconMaterial"] { display: none; }
 [data-testid="stExpander"] summary::after {content: "▸"; float: right; margin-right: 8px;
-  font-size: 15px; color:#7A8290;}
+  font-size: 15px; color:var(--gray-muted);}
 [data-testid="stExpander"] details[open] summary::after {content: "▾";}
 [data-testid="stFileUploader"] span[data-testid="stIconMaterial"],
 [data-testid="stFileUploader"] svg[data-testid="stIconMaterial"] { display: none; }
 [data-testid="stFileUploader"] button { font-size: 14px; }
 .status-bar {display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center;
-  background:#F2F7FC; border:1px solid #E5E9EF; border-radius:8px;
-  padding:8px 14px; margin:6px 0 10px 0; font-size:13.5px; color:#2F3440;}
+  background:#F2F7FC; border:1px solid var(--gray-border); border-radius:8px;
+  padding:8px 14px; margin:6px 0 10px 0; font-size:13.5px; color:var(--gray-ink);}
 .sb-item {white-space:nowrap;}
 div[data-testid="stMetric"] {white-space: nowrap;}
-div[data-testid="stMetricLabel"] p {font-size: 13px !important; color:#7A8290;}
-div[data-testid="stMetricValue"] {font-size: 30px !important; color:#2F3440;}
-.chain-note {text-align:center; color:#7A8290; font-size:14px; margin:0;}
-/* 通用间距（8/12/16/24/32/48） */
+div[data-testid="stMetricLabel"] p {font-size: 13px !important; color:var(--gray-muted);}
+div[data-testid="stMetricValue"] {font-size: 30px !important; color:var(--gray-ink);}
+.chain-note {text-align:center; color:var(--gray-muted); font-size:14px; margin:0;}
+/* 通用间距（8/12/16/24/32/48，P0-7 验收 3） */
 .block-spacing {margin: 24px 0;}
-hr {border: none; border-top: 1px solid #E5E9EF; margin: 24px 0;}
-section[data-testid="stSidebar"] {background:#FFFFFF; border-right:1px solid #E5E9EF;}
+hr {border: none; border-top: 1px solid var(--gray-border); margin: 24px 0;}
+section[data-testid="stSidebar"] {background:#FFFFFF; border-right:1px solid var(--gray-border);}
 section[data-testid="stSidebar"] * {font-size: 14.5px;}
-</style>""", unsafe_allow_html=True)
+.sb-group-title {font-size:13px; font-weight:700; color:var(--gray-muted);
+  letter-spacing:1px; margin:2px 0 4px 0;}
+"""
+st.markdown("<style>" + _CSS_VARS + _CSS_BODY + "</style>", unsafe_allow_html=True)
 
 st.title("双阳极等离子喷涂智能工艺设计平台")
-st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 V1.5")
+st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 V1.6")
 
 
 # ---------------- 通用辅助 ----------------
@@ -213,22 +270,22 @@ def get_bundle():
 
 
 def model_status_badge():
-    """模型状态徽标（V1.5 淡雅配色）：区分「等待数据」与「未训练」，严格按当前模式判定。"""
+    """模型状态徽标（V1.6 色板走 CSS 变量，同源 plot_style）：区分「等待数据」与「未训练」，严格按当前模式判定。"""
     if current_df() is None:
         status = "wait_data"
     else:
         status = st.session_state.get(f"train_status_{MODE_ID}") or \
             ("done" if MODEL.exists() else "none")
     label, color, bg = {
-        "none": ("未训练", "#7A8290", "#F2F7FC"),
-        "wait_data": ("等待数据", "#B77C87", "#FFF5F6"),
-        "running": ("训练中", "#5C86AC", "#EAF3FB"),
-        "done": ("✓ 模型训练完成", "#3D6B8F", "#EAF3FB"),
-        "fail": ("训练失败", "#B77C87", "#FBEDEF"),
+        "none": ("未训练", "var(--gray-muted)", "var(--gray-paper)"),
+        "wait_data": ("等待数据", "var(--pink-accent)", "#FFF5F6"),
+        "running": ("训练中", "var(--blue-signal)", "var(--blue-faint)"),
+        "done": ("✓ 模型训练完成", "var(--blue-signal)", "var(--blue-faint)"),
+        "fail": ("训练失败", "var(--sem-bad)", "#FBEDEF"),
     }[status]
     st.markdown(
         f'<span class="status-pill" style="color:{color};background:{bg};'
-        f'border:1px solid #E5E9EF;">模型状态：{label}</span>',
+        f'border:1px solid var(--gray-border);">模型状态：{label}</span>',
         unsafe_allow_html=True)
 
 
@@ -247,29 +304,248 @@ def stage_result_table(names, value_row, std_map=None, decimals=2):
 
 DEMO_RESULT_NOTICE = "以下结果仅用于验证平台功能，不代表真实双阳极喷涂规律。"
 
-# ---------------- 左侧操作栏（模式/来源已在最顶部；此处为流程与状态） ----------------
+
+# ---------------- V1.6 通用辅助：Tab 导语 + status-pill（P0-7 验收 1） ----------------
+def render_tab_header(tab_key, ctx):
+    """每个 Tab 顶部：一句话导语（ui_labels.TAB_INTROS）+ 同源 status-pill（CTX 只读）。
+
+    首页 / ③ / ⑧ 等所有页面的 n、数据版本、模型版本、CV 方式均来自同一 CTX（P1-2）。
+    """
+    intro = TAB_INTROS.get(tab_key, "")
+    if intro:
+        st.caption(intro)
+    st.markdown(
+        f'<span class="status-pill" style="color:var(--blue-signal);'
+        f'background:var(--blue-faint);border:1px solid var(--blue-light);">'
+        f'{context_pill_text(ctx)}</span>', unsafe_allow_html=True)
+
+
+def _qa_step_of(name):
+    """把 quick_analysis 的步骤名映射到三步指示器的 1/2/3（P1-3）。"""
+    if any(k in name for k in ("读取", "检查")):
+        return 1
+    if any(k in name for k in ("训练", "解释", "优化")):
+        return 2
+    return 3
+
+
+def render_step_indicator():
+    """三步指示器（P1-3）：① 导入 → ② 分析 → ③ 结论。
+
+    状态存 st.session_state["smart_step"]：{step, state, msg}；
+    state ∈ idle|running|done|fail；失败停在该步并显示原因（P0-3 验收 4）。
+    """
+    ss = st.session_state.get("smart_step") or {"step": 1, "state": "idle", "msg": ""}
+    cur, state = int(ss.get("step", 1)), ss.get("state", "idle")
+    nodes = []
+    for i, label in enumerate(SMART_HUB["steps"], start=1):
+        if state == "fail" and i == cur:
+            cls = "step-node fail"
+        elif i < cur or (i == cur and state == "done"):
+            cls = "step-node done"
+        elif i == cur and state == "running":
+            cls = "step-node active"
+        else:
+            cls = "step-node"
+        nodes.append(f'<span class="{cls}">{label}</span>')
+        if i < len(SMART_HUB["steps"]):
+            nodes.append('<span class="step-arrow">──▶</span>')
+    st.markdown(f'<div class="step-wrap">{"".join(nodes)}</div>', unsafe_allow_html=True)
+    if state == "fail" and ss.get("msg"):
+        st.markdown(f'<div class="step-msg">失败原因：{ss["msg"]}</div>', unsafe_allow_html=True)
+    elif state == "running" and ss.get("msg"):
+        st.markdown(f'<div class="step-msg">{ss["msg"]}</div>', unsafe_allow_html=True)
+
+
+def _smart_run_analysis(file_obj):
+    """执行一键分析并驱动三步指示器（P1-3 / P0-3 验收 4）。
+
+    进度回调写入 st.session_state["smart_step"]；任一步失败停在出错步并显示原因，
+    不产出半成品结论；成功后自动展开摘要卡（smart_summary_run_id）。
+    """
+    st.session_state["smart_step"] = {"step": 1, "state": "running", "msg": "数据读取与检查"}
+    _prog = st.status("智能分析运行中…", expanded=True)
+    _log_lines = []
+
+    def _cb(name, status_, msg=""):
+        tag = {"running": "▶", "done": "✓", "skip": "跳过", "fail": "失败"}.get(status_, "·")
+        _log_lines.append(f"{tag} {name}" + (f"（{msg}）" if msg and status_ in ("fail", "skip") else ""))
+        _prog.write("\n".join(_log_lines[-12:]))
+        step_no = _qa_step_of(name)
+        if status_ == "fail":
+            st.session_state["smart_step"] = {"step": step_no, "state": "fail",
+                                              "msg": f"{name}：{msg or '未知原因'}"}
+        elif status_ == "running":
+            st.session_state["smart_step"] = {"step": step_no, "state": "running", "msg": name}
+
+    try:
+        results = qa.quick_analyze_file(file_obj, progress_cb=_cb, demo=use_demo)
+    except Exception as e:
+        st.session_state["smart_step"] = {"step": 2, "state": "fail",
+                                          "msg": friendly_error(e)}
+        _prog.update(label="智能分析失败", state="error")
+        st.error(f"智能分析失败：{friendly_error(e)}")
+        return
+
+    ok_runs = [r for r in results if not r["record"].get("failed")]
+    summary_lines = []
+    for r in results:
+        steps_txt = "，".join(f"{n}:{s}" + (f"（{rsn}）" if rsn and s in ("skip", "fail") else "")
+                             for n, s, rsn in r["steps"])
+        ok = not r["record"].get("failed")
+        summary_lines.append(
+            f"**Run {r['run_id']}**（{r['mode']}，工作表 {r['record'].get('sheet')}）："
+            + ("完成 ｜ " + steps_txt if ok else "未完成（数据准备检查未通过或训练失败）｜ " + steps_txt))
+        if r.get("package"):
+            summary_lines.append(f"- 结果目录：`{r['package'].get('run_dir')}`"
+                                 f"（图 {r['package'].get('figures')} 张，"
+                                 f"含 Insight_Report、图表解读与 evidence_manifest）")
+    st.markdown("\\n\\n".join(summary_lines))
+    st.session_state["qa_state"] = {"last_results": [
+        {k: r[k] for k in ("run_id", "mode", "record")} for r in results]}
+
+    if ok_runs:
+        # 默认展示最近一次成功 run（已拍板决策 §八.3）
+        st.session_state["smart_summary_run_id"] = ok_runs[-1]["run_id"]
+        st.session_state["smart_step"] = {"step": 3, "state": "done", "msg": ""}
+        _prog.update(label="智能分析完成", state="complete")
+    else:
+        # 全部失败：如实展示失败原因与检查项，禁止半成品结论（P0-3 验收 4）
+        _fail_reasons = []
+        for r in results:
+            for n, s, rsn in r["steps"]:
+                if s == "fail" and rsn:
+                    _fail_reasons.append(f"{n}：{rsn}")
+        _warns = []
+        for r in results:
+            _warns += r.get("warnings") or []
+        st.session_state["smart_step"] = {
+            "step": 2, "state": "fail",
+            "msg": "；".join(_fail_reasons[:3]) or "数据准备检查未通过"}
+        _prog.update(label="智能分析未完成", state="error")
+        if _fail_reasons:
+            st.error("未通过的检查项：\n- " + "\n- ".join(_fail_reasons[:6]))
+        if _warns:
+            st.warning("提示：\n- " + "\n- ".join(_warns[:6]))
+
+
+def render_smart_summary(run_id):
+    """智能分析摘要卡（P0-3）：顶部元信息 / 证据区 / 结论区（徽标可溯源）/ 行动区。
+
+    数据源：qa.load_smart_summary(run_id) + EvidenceRegistry.load(run_dir)；
+    旧 run 无 manifest → evidence.legacy_run_notice()（已拍板兼容方案）。
+    """
+    summ = qa.load_smart_summary(run_id)
+    run_dir = qa.QUICK_ROOT / str(run_id)
+    if summ is None:
+        st.info(f"运行 {run_id} 未生成智能摘要（可能为 V1.5 旧版运行或缺 summary.json）。")
+        evidence_mod.legacy_run_notice()
+        return
+    registry = evidence_mod.EvidenceRegistry.load(run_dir)
+    demo = bool(summ.get("demo"))
+    head = summ.get("header") or {}
+
+    st.markdown('<div class="sum-card">', unsafe_allow_html=True)
+    # ① 顶部：Run 元信息 + status-pill（全部真实计算值）
+    _pills = [f"研究模式：{summ.get('mode_label', summ.get('mode', '—'))}",
+              f"n={head.get('n', '—')}",
+              f"数据版本 {head.get('data_version') or '—'}",
+              f"模型版本 {str(head.get('model_version') or '—').split('_')[-1]}",
+              f"CV: {head.get('cv_method') or '—'}"]
+    if head.get("stage15"):
+        _pills.append("Stage 1.5 已启用")
+    if demo:
+        _pills.append("演示数据")
+    st.markdown(
+        f'<div class="sum-head"><span class="sum-title">智能分析摘要 · Run {run_id}</span>'
+        + "".join(f'<span class="status-pill" style="color:var(--blue-signal);'
+                  f'background:var(--blue-faint);border:1px solid var(--blue-light);">{p}</span>'
+                  for p in _pills) + "</div>", unsafe_allow_html=True)
+    if demo:
+        st.markdown(f'<div class="demo-banner">{EVIDENCE_LABELS["demo_notice"]}</div>',
+                    unsafe_allow_html=True)
+
+    # ② 证据区：各 Stage 指标小表 + Top 5 特征重要性（统一图入口）
+    c_ev1, c_ev2 = st.columns([3, 2])
+    with c_ev1:
+        stage_rows = []
+        _stage_name = {"stage1": "一级模型", "stage15": "Stage 1.5",
+                       "stage2": "二级模型", "stage3": "三级模型"}
+        for stage, rows in (summ.get("stages") or {}).items():
+            for r in rows:
+                stage_rows.append({
+                    "模型层级": _stage_name.get(stage, stage),
+                    "目标": zh(r.get("target", "")),
+                    "n": r.get("n"),
+                    **({"R²": round(float(r["R2"]), 3), "RMSE": round(float(r["RMSE"]), 3),
+                        "MAE": round(float(r["MAE"]), 3)} if "R2" in r else
+                       {"Accuracy": r.get("Accuracy"), "平衡准确率": r.get("Balanced_Accuracy")}),
+                })
+        if stage_rows:
+            st.dataframe(pd.DataFrame(stage_rows), width="stretch", hide_index=True)
+    with c_ev2:
+        tf = summ.get("top_features") or []
+        if tf:
+            imp_df = pd.DataFrame({"影响因素": [zh(f["feature"]) for f in tf],
+                                   "重要性": [f["importance"] for f in tf]})
+            fig_imp = pstyle.importance_chart(imp_df, title="Top 5 特征重要性（一级模型首目标）")
+            if demo:
+                pstyle.add_demo_watermark(fig_imp)
+            st.plotly_chart(fig_imp, width="stretch", key=f"sum_imp_{run_id}")
+    if summ.get("coverage"):
+        st.caption(f"数据覆盖：{summ['coverage']}")
+    if summ.get("pareto"):
+        st.caption(f"Pareto：非支配方案 {summ['pareto']['n_pareto']} 个"
+                   f"（候选 {summ['pareto']['n_candidates']}，满足约束 {summ['pareto']['n_feasible']}）")
+
+    # ③ 结论区：每句带证据徽标，可点开溯源（P0-2 验收 1）
+    st.markdown("**结论（每条可点开「证据详情」溯源）**")
+    conclusions = summ.get("conclusions") or []
+    if not conclusions:
+        st.caption("本 run 未生成证据化结论（可能为旧版运行）。")
+        evidence_mod.legacy_run_notice()
+    for c in conclusions:
+        item = registry.get(c["eid"]) if registry is not None else None
+        evidence_mod.badge_row(c["text"], item, key=run_id)
+
+    # ④ 行动区：下一步指引（Streamlit 无法编程切 Tab，降级为指引 + run_id 复制）+ 下载 ZIP
+    st.markdown("**下一步**：前往 ③ 模型训练 查看完整 CV 指标 ｜ ⑤ 模型解析 查看 SHAP/PDP ｜ "
+                "⑥ 数据洞察 查看三源分级 ｜ ⑦ 逆向设计 查看 Pareto ｜ ⑧ 结果输出 下载论文结果包。")
+    _c_zip = run_dir / "results" / "results.zip"
+    _zip_alt = run_dir / "results.zip"
+    _zip_path = _c_zip if _c_zip.exists() else (_zip_alt if _zip_alt.exists() else None)
+    a1, a2 = st.columns(2)
+    a1.code(run_id, language=None)
+    a1.caption("Run ID（一键复制，用于运行历史 / 设为正式模型）")
+    if _zip_path is not None:
+        with open(_zip_path, "rb") as f:
+            a2.download_button("下载结果包 ZIP（含 evidence_manifest.json）", f,
+                               file_name=_zip_path.name, mime="application/zip",
+                               key=f"sum_zip_{run_id}", use_container_width=True)
+    else:
+        a2.caption("结果包 ZIP 见运行目录（本 run 未打包或已清理）。")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------- 左侧操作栏（V1.6 P0-7 验收 4：模式/来源 → 分隔 → 推荐流程 → 分隔 → 状态摘要） ----------------
 with st.sidebar:
+    # 分组一：模式与数据来源提示（顶部模式选择已在 V1.4 区块）
     if USE_DEMO:
-        st.warning("【当前为模拟演示数据】\n\n"
-                   "仅用于软件功能测试，\n"
-                   "不代表真实实验规律，\n"
-                   "不得用于科研结论。")
+        evidence_mod.demo_banner()
     elif DATA_KIND == "literature":
         st.info("【文献数据模式】\n\n请在「数据管理」页面上传文献数据表，"
                 "文献模式需自行选择 X / 熔融 / 缺陷 / Y 变量。")
     else:
         st.info("【真实实验数据模式】\n\n请先在「数据管理」页面上传真实数据。")
 
-    st.markdown("---")
-    st.markdown("**推荐操作流程**")
+    st.markdown('<div class="sb-group-title">推荐流程</div>', unsafe_allow_html=True)
     st.markdown("\n".join(MODE["flow"]))
 
-    st.markdown("---")
+    st.markdown('<div class="sb-group-title">状态摘要</div>', unsafe_allow_html=True)
     model_status_badge()
 
     _sd = current_df()
     if not USE_DEMO and _sd is not None:
-        st.markdown("---")
+        st.markdown('---')
         st.markdown("**当前数据概况**")
         st.write(f"文件名称：{st.session_state.get('data_name', CURRENT_DATA_FILE.name)}")
         st.write(f"数据记录数：{len(_sd)}")
@@ -302,8 +578,80 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "⑤ 模型解析", "⑥ 数据洞察与实验反馈", "⑦ 逆向设计", "⑧ 结果输出"
 ])
 
-# ---------------- ① 平台首页 ----------------
+# ---------------- ① 平台首页（V1.6：智能操作区 + 摘要卡 + 研究主线 + 历史 + 状态面板） ----------------
 with tab0:
+    render_tab_header("tab0", CTX)
+
+    # ---------- ⓪ 智能操作区（Smart Actions Hub，P0-1）：首屏第一视觉 ----------
+    _smart_run_now = False
+    with st.container():
+        st.markdown(f'<div class="smart-hub-title">{SMART_HUB["title"]}</div>',
+                    unsafe_allow_html=True)
+        _qa_hist_now = [h for h in qa.latest_runs(10) if not h.get("failed")]
+        c_imp, c_ana = st.columns(2)
+        with c_imp:
+            # 「⬆ 智能一键导入」：点击展开内联拖放区（key="qa_uploader"，行为与 V1.5 一致）
+            if st.button(SMART_HUB["btn_import"], type="primary", key="smart_import_btn"):
+                st.session_state["smart_import_open"] = not st.session_state.get("smart_import_open", False)
+            st.caption(SMART_HUB["btn_import_hint"])
+        with c_ana:
+            _pending_file = st.session_state.get("qa_file_cache")
+            if _pending_file is not None:
+                # 就绪态：有文件未分析 → 直接触发一键分析
+                if st.button(SMART_HUB["btn_analyze"], type="primary", key="smart_analyze_btn"):
+                    _smart_run_now = True
+                st.caption(f"{SMART_HUB['ready_hint']}（文件：{_pending_file.name}）")
+            elif _qa_hist_now:
+                # 结果态：有最新 run → 刷新摘要卡
+                if st.button(f"{SMART_HUB['btn_analyze']}（查看最新结果）", type="primary",
+                             key="smart_analyze_btn"):
+                    st.session_state["smart_summary_run_id"] = _qa_hist_now[0]["run_id"]
+                st.caption(SMART_HUB["result_hint"])
+            else:
+                # 空态：半透明（ghost 样式），点击引导导入
+                if st.button(SMART_HUB["btn_analyze_empty"], key="smart_analyze_btn"):
+                    st.info(SMART_HUB["empty_guide"])
+                st.caption("尚无待分析文件与历史运行记录。")
+
+        # 内联拖放区（智能一键导入展开时显示； uploader key 与 V1.5 完全一致）
+        if st.session_state.get("smart_import_open"):
+            qa_file = st.file_uploader("将 Excel / CSV 拖到这里（支持 XLSX、XLS、CSV）",
+                                       type=["xlsx", "xls", "csv"], key="qa_uploader")
+            if qa_file is not None:
+                st.session_state["qa_file_cache"] = qa_file
+                try:
+                    qa_sheets = list_sheets(qa_file)
+                    qa_data_sheets, qa_meta_sheets = qa.classify_sheets(qa_sheets)
+                    st.info(f"识别到 {len(qa_data_sheets)} 个数据工作表（已跳过说明/元数据表："
+                            f"{'、'.join(qa_meta_sheets) or '无'}），每个将独立运行；"
+                            "数据安全检查未通过时会明确拦截并说明原因。")
+                except Exception as e:
+                    st.error(f"文件读取失败：{friendly_error(e)}")
+        elif st.session_state.get("qa_file_cache") is not None:
+            st.caption(f"已缓存待分析文件：{st.session_state['qa_file_cache'].name}"
+                       "（点击「✦ 智能分析」开始；重新点击「⬆ 智能一键导入」可更换文件）")
+
+    # 三步指示器（P1-3）：在智能操作区之下、分析执行之后渲染，确保显示最新状态
+    render_step_indicator()
+    if _smart_run_now and st.session_state.get("qa_file_cache") is not None:
+        _smart_run_analysis(st.session_state["qa_file_cache"])
+        render_step_indicator()  # 分析完成后即时刷新指示器终态
+
+    # ---------- ⓛ 智能分析摘要卡（Smart Summary Card，P0-3） ----------
+    if st.session_state.get("smart_summary_run_id"):
+        _sum_runs = [h for h in qa.latest_runs(10) if not h.get("failed")]
+        if len(_sum_runs) > 1:
+            _pick = st.selectbox("查看运行", [h["run_id"] for h in _sum_runs],
+                                 index=[h["run_id"] for h in _sum_runs].index(
+                                     st.session_state["smart_summary_run_id"])
+                                 if st.session_state["smart_summary_run_id"] in
+                                 [h["run_id"] for h in _sum_runs] else 0,
+                                 key="sum_run_pick")
+            st.session_state["smart_summary_run_id"] = _pick
+        render_smart_summary(st.session_state["smart_summary_run_id"])
+
+    # ---------- ⓜ 研究主线卡片 flow-card（V1.5 原样保留） ----------
+    st.markdown("---")
     st.subheader(f"研究主线 · {MODE['label']}")
     flow = MODE["research_line"]
     cards = []
@@ -316,59 +664,11 @@ with tab0:
                 ' → 缺陷网络 → 涂层性能 → 多目标逆向设计 → 实验验证与模型更新</p>',
                 unsafe_allow_html=True)
 
-    # ---------------- V1.5 快速科研分析（拖入 Excel/CSV → 一键结果） ----------------
-    st.markdown("---")
-    st.subheader("快速科研分析")
-    st.caption("把 Excel / CSV 拖到下面即可自动识别字段并一键生成科研结果包；"
-               "多工作表（Dataset_01/02…）会分别独立运行，不会自动合并。"
-               "快速分析结果保存在 runs/quick_analysis/，不会覆盖正式模型。")
-    qa_file = st.file_uploader("将 Excel / CSV 拖到这里（支持 XLSX、XLS、CSV）",
-                               type=["xlsx", "xls", "csv"], key="qa_uploader")
-    qa_state = st.session_state.get("qa_state") or {}
-
-    if qa_file is not None:
-        try:
-            qa_sheets = list_sheets(qa_file)
-            qa_data_sheets, qa_meta_sheets = qa.classify_sheets(qa_sheets)
-            if len(qa_data_sheets) > 1:
-                st.info(f"识别到 {len(qa_data_sheets)} 个数据工作表（已跳过说明/元数据表："
-                        f"{'、'.join(qa_meta_sheets) or '无'}），每个将独立运行。")
-            if st.button("🚀 一键分析并生成结果", type="primary", key="qa_run"):
-                _prog = st.status("快速科研分析运行中…", expanded=True)
-                _log_lines = []
-
-                def _cb(name, status_, msg=""):
-                    tag = {"running": "▶", "done": "✓", "skip": "跳过", "fail": "失败"}.get(status_, "·")
-                    _log_lines.append(f"{tag} {name}" + (f"（{msg}）" if msg and status_ == 'fail' else
-                                                         (f"（{msg}）" if msg and status_ == 'skip' else "")))
-                    _prog.write("\n".join(_log_lines[-12:]))
-
-                results = qa.quick_analyze_file(qa_file, progress_cb=_cb, demo=use_demo)
-                summary_lines = []
-                for r in results:
-                    steps_txt = "，".join(f"{n}:{s}" + (f"（{rsn}）" if rsn and s in ("skip", "fail") else "")
-                                         for n, s, rsn in r["steps"])
-                    ok = not r["record"].get("failed")
-                    summary_lines.append(
-                        f"**Run {r['run_id']}**（{r['mode']}，工作表 {r['record'].get('sheet')}）："
-                        + ("完成 ｜ " + steps_txt if ok else "未完成（数据准备检查未通过或训练失败）｜ " + steps_txt))
-                    if r.get("package"):
-                        summary_lines.append(f"- 结果目录：`{r['package'].get('run_dir')}`"
-                                             f"（图 {r['package'].get('figures')} 张，"
-                                             f"含 Insight_Report 与图表解读）")
-                _prog.update(label="快速科研分析完成", state="complete" if all(
-                    not r["record"].get("failed") for r in results) else "error")
-                st.markdown("\n\n".join(summary_lines))
-                st.session_state["qa_state"] = {"last_results": [
-                    {k: r[k] for k in ("run_id", "mode", "record")} for r in results]}
-        except Exception as e:
-            st.error(f"快速分析失败：{friendly_error(e)}")
-
+    # ---------- ⓝ 运行历史 / 设为正式模型（折叠 expander，V1.5 原样保留） ----------
     if st.button("进入常规分析模式（数据管理 → 训练 → 预测 → 解析 → 洞察 → 逆向 → 输出）",
                  key="qa_expert_hint"):
         st.info("请依次使用顶部导航的 ②–⑧ 页；每个环节可单独控制。")
 
-    # Run History（最近 10 次）
     qa_hist = qa.latest_runs(10)
     if qa_hist:
         with st.expander(f"运行历史（Run History，最近 {len(qa_hist)} 次）", expanded=False):
@@ -394,25 +694,31 @@ with tab0:
                 else:
                     st.warning("请先填写 run_id。")
 
+    # ---------- ⓞ 平台状态面板（P1-2 升级：与 ③⑧ 同源 CTX，禁止二次计算） ----------
     st.markdown("---")
     st.subheader("平台状态")
     d = current_df()
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("当前实验数据量", len(d) if d is not None else "-")
-    c2.metric("喷涂批次数", d["batch_id"].nunique() if d is not None and "batch_id" in d else "-")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("当前实验数据量", CTX.get("record_count") if CTX.get("dataset_loaded") else "-")
+    c2.metric("喷涂批次数", CTX.get("batch_count") if CTX.get("batch_count") is not None else "-")
     c3.metric("数据完整率", f"{completeness_pct(d):.1f} %" if d is not None else "-")
-    c4.metric("模型状态", "✓ 已训练" if MODEL.exists() else "未训练")
-    c5.metric("数据模式", "模拟数据" if use_demo else "真实数据")
+    c4.metric("数据版本", CTX.get("dataset_version") or "—")
+    c5.metric("模型状态", ("✓ 已训练" if CTX.get("model_trained") else "未训练")
+              + f" ｜ {context_cv_short(CTX)}")
+    c6.metric("数据模式", "模拟数据" if use_demo else "真实数据")
+    st.caption(f"研究模式：{CTX.get('research_mode_label')} ｜ 模型版本：{CTX.get('model_version') or '—'}"
+               f" ｜ 状态与 ③ 模型训练 / ⑧ 结果输出 同源（同一 CTX）。")
 
     if use_demo and d is not None:
-        st.info("当前平台处于模拟演示数据模式，全部结果仅用于验证平台功能。")
+        evidence_mod.demo_banner()
 
 # ---------------- ② 数据管理 ----------------
 with tab1:
     st.subheader("数据管理与质量检查")
+    render_tab_header("tab1", CTX)
     if USE_DEMO:
         d = current_df()
-        st.info("当前使用内置模拟数据，仅用于测试平台功能。")
+        evidence_mod.demo_banner()
     else:
         # V1.4/V1.5：按模式/来源上传；修复上传按钮图标连字重复残片（隐藏图标 + 明确格式说明）
         uploaded = st.file_uploader("上传数据文件", type=["xlsx", "xls", "csv"],
@@ -463,12 +769,7 @@ with tab1:
             st.caption("说明：当前数据未包含 sample_id 列，独立试样数暂无法统计；"
                        "数据记录数按行计数，与独立试样数是不同概念。")
 
-        st.markdown("**数据预览（前 30 行）**")
-        preview = d.head(30).copy()
-        num_cols = preview.select_dtypes("number").columns
-        preview[num_cols] = preview[num_cols].round(3)
-        st.dataframe(zh_df(preview), width="stretch")
-
+        # V1.6（P0-7 验收 2）：异常字段检查为 hero（首屏可见）；预览/完整度收进次级证据区
         if issues:
             st.warning("⚠ 检测到以下数据问题")
             for x in issues:
@@ -476,17 +777,23 @@ with tab1:
         else:
             st.success("✓ 基础数据格式检查通过")
 
+        with st.expander("次级证据：数据预览（前 30 行）", expanded=False):
+            preview = d.head(30).copy()
+            num_cols = preview.select_dtypes("number").columns
+            preview[num_cols] = preview[num_cols].round(3)
+            st.dataframe(zh_df(preview), width="stretch")
+
         target_cols = grp["process_states"] + grp["defect_network"] + grp["performance_outputs"]
         comp = numeric_completion(d, target_cols)
         if len(comp):
-            st.markdown("**关键字段数据完整度**")
-            comp_disp = comp.copy()
-            comp_disp["column"] = comp_disp["column"].map(zh)
-            comp_disp = comp_disp.rename(columns=QUALITY_LABELS)
-            comp_disp["缺失比例（%）"] = comp_disp["缺失比例（%）"].round(1)
-            st.dataframe(comp_disp, width="stretch", hide_index=True)
+            with st.expander("次级证据：关键字段数据完整度", expanded=False):
+                comp_disp = comp.copy()
+                comp_disp["column"] = comp_disp["column"].map(zh)
+                comp_disp = comp_disp.rename(columns=QUALITY_LABELS)
+                comp_disp["缺失比例（%）"] = comp_disp["缺失比例（%）"].round(1)
+                st.dataframe(comp_disp, width="stretch", hide_index=True)
 
-        with st.expander("重复性统计（重复测量，n/mean/std/CV%）", expanded=False):
+        with st.expander("次级证据：重复性统计（重复测量，n/mean/std/CV%）", expanded=False):
             stats_df = replicate_stats(d, "sample_id") or replicate_stats(d, "experiment_id")
             if stats_df is None or stats_df.empty:
                 st.caption("当前数据未检测到重复测量记录（同一试样/实验条件下 ≥2 次测量）。"
@@ -531,7 +838,7 @@ with tab1:
                 st.caption("建议映射：" + ("；".join(f"{zh(k)} ← {v}" for k, v in sugg.items())
                                           or "无相近列名"))
 
-            if st.button("应用变量选择并构建运行时 Schema", type="primary", key="lit_apply"):
+            if st.button("应用变量选择并构建运行时 Schema", key="lit_apply"):
                 if not sel_x:
                     st.error("至少选择 1 个输入变量 X。")
                 else:
@@ -566,9 +873,11 @@ with tab1:
 with tab2:
     # V1.5 spec 五十八：主标题 + 副标题 + Stage 1.5 小标签（不用超长标题）
     st.subheader("三级代理模型训练")
+    render_tab_header("tab2", CTX)
     st.caption("结构 / 工艺 / 材料 → 过程状态 → 缺陷 → 性能 ｜ "
                f"当前模式：{MODE['label']}（{MODE['train_desc']}）")
-    st.markdown('<span class="status-pill" style="color:#B77C87;background:#FFF5F6;border:1px solid #E8B8C0;">'
+    st.markdown('<span class="status-pill" style="color:var(--pink-accent);background:#FFF5F6;'
+                'border:1px solid var(--pink-light);">'
                 'Stage 1.5：颗粒熔融与沉积状态（可选）</span>', unsafe_allow_html=True)
 
     if MODE_ID == "dual_anode":
@@ -616,7 +925,7 @@ with tab2:
         if MODE_ID == "literature" and not st.session_state.get("lit_schema"):
             st.warning("文献模式请先在「数据管理」页完成变量选择并构建运行时 Schema。")
         _can_train = not _crit
-        if _can_train and st.button("🚀 开始模型训练", type="primary"):
+        if _can_train and st.button("🚀 开始模型训练"):
             st.session_state[f"train_status_{MODE_ID}"] = "running"
             with st.spinner("正在训练与全链交叉验证（每个折叠重新训练各级模型，约需 1-3 分钟，请保持页面打开）..."):
                 try:
@@ -674,24 +983,46 @@ with tab2:
                             weak.append(zh(t))
             if rows:
                 df_rows = pd.DataFrame(rows)
-                # V1.3.2：各预测目标交叉验证 R² 总览（横向柱状图，按模型层级分组，仅客观值）
+                # V1.6（P0-4）：R² 总览改走 plot_style 统一色板（QUAL_CYCLE 按 Stage 语义）
                 fig_r2 = px.bar(df_rows, x="决定系数 R²", y="预测指标", color="模型层级",
                                 orientation="h", title="各预测目标交叉验证 R² 总览",
-                                color_discrete_map={"一级模型": "#2f5f9e", "二级模型": "#3a8f6f",
-                                                    "三级模型": "#b0722d"},
+                                color_discrete_map=pstyle.discrete_map(
+                                    ["一级模型", "二级模型", "三级模型"]),
                                 custom_data=["均方根误差 RMSE", "平均绝对误差 MAE"])
                 fig_r2.update_yaxes(categoryorder="array",
                                     categoryarray=list(df_rows["预测指标"])[::-1])
-                fig_r2.add_vline(x=0, line_width=1, line_dash="dot", line_color="#98a2b3")
+                fig_r2.add_vline(x=0, line_width=1, line_dash="dot",
+                                 line_color=pstyle.GRAY_REF)
                 fig_r2.update_traces(text=[f"{v:.3f}" for v in df_rows["决定系数 R²"]],
                                      textposition="outside", cliponaxis=False,
                                      hovertemplate="%{y}<br>R²=%{x:.4f}"
                                                    "<br>RMSE=%{customdata[0]:.4g}<br>MAE=%{customdata[1]:.4g}<extra></extra>")
-                fig_r2.update_layout(title_font_size=15, legend_title_text="",
-                                     margin=dict(l=10, r=30, t=45, b=10),
-                                     height=max(360, 34 * len(df_rows) + 90))
+                # V1.6（P0-4 验收 2）：统计诚信注脚（CV 方式）+ Demo 水印
+                pstyle.nature_layout(fig_r2, height=max(pstyle.HERO_HEIGHT - 100,
+                                                        34 * len(df_rows) + 90))
+                pstyle.add_stat_note(fig_r2, pstyle.stat_note(
+                    n=int(len(d)), cv_method=cv.get("method")))
+                if use_demo:
+                    pstyle.add_demo_watermark(fig_r2)
                 st.plotly_chart(fig_r2, width="stretch", key="cv_r2_overview")
                 st.dataframe(df_rows, width="stretch", hide_index=True)
+                # V1.6（P0-2）：CV 指标表旁挂证据徽标（model 类：R²/RMSE/n/CV）
+                _badge_vals = []
+                for stage in ["stage1", "stage2", "stage3"]:
+                    for t, met in (cv_metrics.get(stage) or {}).items():
+                        _oof_s = (cv.get("oof_predictions") or {}).get(stage)
+                        _n_t = int(_oof_s[t].dropna().shape[0]) if (
+                            _oof_s is not None and hasattr(_oof_s, "columns")
+                            and t in getattr(_oof_s, "columns", [])) else int(len(d))
+                        _badge_vals.append(f"{zh_short(t)} R²={float(met['R2']):.3f} (n={_n_t})")
+                st.markdown(
+                    evidence_mod.badge_span(
+                        "CV: " + (cv.get("method") or "—") + " ｜ " + " ｜ ".join(_badge_vals[:4])
+                        + ("…" if len(_badge_vals) > 4 else ""),
+                        source_class="model", demo=use_demo),
+                    unsafe_allow_html=True)
+                st.caption("徽标数值来自 model_chain.train_chain_full 的全链分组交叉验证"
+                           "（OOF 折外预测）；Quick Run 的结论可在首页摘要卡逐条溯源。")
                 if st.button("📋 复制模型信息", key="btn_copy_info"):
                     info_lines = [
                         f"模型层级：{r['模型层级']}｜目标：{r['预测指标']}｜模型类型：{r['模型类型']}｜"
@@ -705,8 +1036,8 @@ with tab2:
                 st.caption("指标均为外层分组交叉验证结果（每个折叠重新训练三级模型后仅预测验证批次），"
                            "非训练集拟合值；最终部署模型使用全部数据单独训练，用于实际预测。")
             if weak:
-                st.warning(f"{'、'.join(weak)}：该目标当前交叉验证预测能力较弱，"
-                           "建议后续检查样本量、变量覆盖范围及数据噪声。")
+                st.warning(f"数据显示{'、'.join(weak)}在当前交叉验证设置下预测能力较弱"
+                           "（R² < 0）；建议后续检查样本量、变量覆盖范围及数据噪声。")
 
             # V1.4：Stage 1.5 熔融层指标（启用时单独展示，不混入三级主链指标表）
             m15 = cv_metrics.get("stage15") or {}
@@ -733,6 +1064,7 @@ with tab2:
 # ---------------- ④ 工艺预测 ----------------
 with tab3:
     st.subheader("单组工艺参数全链预测")
+    render_tab_header("tab3", CTX)
     st.markdown("输入一组喷枪结构与工艺参数，系统将依次预测：\n\n"
                 "射流/粒子状态 → 涂层缺陷网络 → 涂层性能")
     if get_bundle() is None:
@@ -792,30 +1124,31 @@ with tab3:
                 value=float(default), key="predp_" + col)
             i += 1
 
-        # 训练数据覆盖范围检查（范围来源于训练数据，并非设备极限）
+        # 训练数据覆盖范围检查（范围来源于训练数据，并非设备极限）——V1.6 收进次级证据区
         domain = bundle.get("training_domain") or {}
         if domain:
-            st.markdown("**训练数据覆盖范围检查**")
-            lines = []
-            has_extrap = False
-            for col, v in vals.items():
-                dom = domain.get(col)
-                if dom is None:
-                    continue
-                status = classify_support(v, dom)
-                if status == "extrap":
-                    has_extrap = True
-                lines.append(f'<span style="color:{SUPPORT_COLOR[status]};">●</span> '
-                             f'{zh(col)}：{support_label(status)}'
-                             f'<span style="color:#8a8b98;">（训练数据 {dom["min"]:.1f}–{dom["max"]:.1f}，'
-                             f'中位数 {dom["median"]:.1f}）</span>')
-            st.markdown("<br>".join(lines), unsafe_allow_html=True)
-            if has_extrap:
-                st.error("当前输入超出了模型训练数据覆盖范围，属于外推预测，结果可靠性可能降低。"
-                         "如仍在设备允许范围内，可继续预测，但请谨慎解读结果。")
-            st.caption("范围分级来源于当前训练数据，并非设备极限。")
+            with st.expander("次级证据：训练数据覆盖范围检查（范围来源于训练数据，并非设备极限）",
+                             expanded=False):
+                lines = []
+                has_extrap = False
+                for col, v in vals.items():
+                    dom = domain.get(col)
+                    if dom is None:
+                        continue
+                    status = classify_support(v, dom)
+                    if status == "extrap":
+                        has_extrap = True
+                    lines.append(f'<span style="color:{SUPPORT_COLOR[status]};">●</span> '
+                                 f'{zh(col)}：{support_label(status)}'
+                                 f'<span style="color:var(--gray-muted);">（训练数据 {dom["min"]:.1f}–{dom["max"]:.1f}，'
+                                 f'中位数 {dom["median"]:.1f}）</span>')
+                st.markdown("<br>".join(lines), unsafe_allow_html=True)
+                if has_extrap:
+                    st.error("当前输入超出了模型训练数据覆盖范围，属于外推预测，结果可靠性可能降低。"
+                             "如仍在设备允许范围内，可继续预测，但请谨慎解读结果。")
+                st.caption("范围分级来源于当前训练数据，并非设备极限。")
 
-        if st.button("开始全链预测", type="primary"):
+        if st.button("开始全链预测"):
             device_violation = \
                 [c for c in vals
                  if c in schema["structure_inputs"] and
@@ -867,34 +1200,36 @@ with tab3:
                     st.dataframe(stage_result_table(bundle["perf_cols"], perf.iloc[0], std_map),
                                  width="stretch", hide_index=True)
 
-                    # V1.5 spec 四十一：历史数据参考（最近 3–5 个真实实验/文献数据）
-                    st.markdown("**【历史数据参考】**")
-                    d_ref = current_df()
-                    near = insight_mod.nearest_experiments(vals, d_ref,
-                                                           input_cols=list(vals.keys()), k=5)
-                    if len(near):
-                        st.dataframe(near, width="stretch", hide_index=True)
-                        domain_ref = bundle.get("training_domain") or {}
-                        if domain_ref:
-                            bad_cols = [c for c, v in vals.items()
-                                        if c in domain_ref and not (domain_ref[c]["min"] <= v <= domain_ref[c]["max"])]
-                            edge_cols = [c for c, v in vals.items()
-                                         if c in domain_ref and (v < domain_ref[c]["q1"] or v > domain_ref[c]["q3"])
-                                         and domain_ref[c]["min"] <= v <= domain_ref[c]["max"]]
-                            if bad_cols:
-                                st.warning("当前输入相对历史数据存在外推风险：" + "、".join(zh(c) for c in bad_cols))
-                            elif edge_cols:
-                                st.caption("当前输入接近历史数据边界：" + "、".join(zh(c) for c in edge_cols))
-                            else:
-                                st.caption("当前输入位于历史数据覆盖范围内（数据支持充分）。")
-                    else:
-                        st.caption("当前无可参考的历史真实数据。")
+                    # V1.5 spec 四十一 + V1.6 四段式：历史数据参考收进次级证据区
+                    with st.expander("次级证据：历史数据参考（最近 3–5 个真实实验/文献数据）",
+                                     expanded=False):
+                        d_ref = current_df()
+                        near = insight_mod.nearest_experiments(vals, d_ref,
+                                                               input_cols=list(vals.keys()), k=5)
+                        if len(near):
+                            st.dataframe(near, width="stretch", hide_index=True)
+                            domain_ref = bundle.get("training_domain") or {}
+                            if domain_ref:
+                                bad_cols = [c for c, v in vals.items()
+                                            if c in domain_ref and not (domain_ref[c]["min"] <= v <= domain_ref[c]["max"])]
+                                edge_cols = [c for c, v in vals.items()
+                                             if c in domain_ref and (v < domain_ref[c]["q1"] or v > domain_ref[c]["q3"])
+                                             and domain_ref[c]["min"] <= v <= domain_ref[c]["max"]]
+                                if bad_cols:
+                                    st.warning("当前输入相对历史数据存在外推风险：" + "、".join(zh(c) for c in bad_cols))
+                                elif edge_cols:
+                                    st.caption("当前输入接近历史数据边界：" + "、".join(zh(c) for c in edge_cols))
+                                else:
+                                    st.caption("当前输入位于历史数据覆盖范围内（数据支持充分）。")
+                        else:
+                            st.caption("当前无可参考的历史真实数据。")
                 except Exception as e:
                     st.error(friendly_error(e, current_df(), schema))
 
 # ---------------- ⑤ 模型解析 ----------------
 with tab4:
     st.subheader("模型解析与关键因素分析")
+    render_tab_header("tab4", CTX)
     if get_bundle() is None:
         st.warning("请先训练模型。")
     else:
@@ -929,15 +1264,20 @@ with tab4:
                 }).sort_values("特征重要性", ascending=False).head(topn_disp)
 
                 st.markdown("**XGBoost 特征重要性**")
-                fig = px.bar(imp.sort_values("特征重要性"), x="特征重要性", y="影响因素",
-                             orientation="h", title=f"{zh_short(target)}关键影响因素排序 Top {len(imp)}")
-                fig.update_layout(title_font_size=16, width=680,
-                                  height=max(340, 30 * len(imp) + 90),
-                                  margin=dict(l=10, r=15, t=50, b=10))
+                # V1.6（P0-4/P1-4）：统一图入口 + 统计注脚 + Demo 水印 + 下载三件套
+                fig = pstyle.importance_chart(
+                    imp, title=f"{zh_short(target)}关键影响因素排序 Top {len(imp)}")
+                _df_an = current_df()
+                pstyle.add_stat_note(fig, pstyle.stat_note(
+                    n=int(len(_df_an)) if _df_an is not None else 0,
+                    cv_method=(get_bundle().get("chain_cv") or {}).get("method")))
+                if use_demo:
+                    pstyle.add_demo_watermark(fig)
                 try:
-                    st.plotly_chart(fig, width=680, key="an_imp_fig")
+                    st.plotly_chart(fig, width="stretch", key="an_imp_fig")
                 except Exception:
                     st.plotly_chart(fig, key="an_imp_fig")
+                pstyle.fig_download_row(fig, imp, f"Fig_Importance_{target}", key="an_imp_dl")
 
         # ---------------- V1.4：颗粒熔融与沉积状态分析（Stage 1.5） ----------------
         st.markdown("---")
@@ -983,16 +1323,20 @@ with tab4:
                     if _cls:
                         _dd["_cls"] = _dd[_cls].astype(str).map(
                             lambda x: MELTING_CLASS_ZH.get(x, x))
+                        _cls_levels = list(pd.unique(_dd["_cls"]))
                         fig_tv = px.scatter(_dd, x="_V", y="_T", color="_cls",
                                             labels={"_V": zh(_vcol), "_T": zh(_tcol), "_cls": "熔融状态"},
                                             title="颗粒温度—速度状态图（按熔融状态类别着色，类别来自数据标签）",
+                                            color_discrete_map=pstyle.discrete_map(_cls_levels),
                                             hover_data=[c for c in ["melting_index", "melting_fraction_pct"]
                                                         if c in _dd.columns])
                     else:
                         fig_tv = px.scatter(_dd, x="_V", y="_T",
                                             labels={"_V": zh(_vcol), "_T": zh(_tcol)},
                                             title="颗粒温度—速度状态图（无熔融类别标签，仅散点，不划分熔融区）")
-                    fig_tv.update_layout(title_font_size=15, margin=dict(l=10, r=15, t=50, b=10))
+                    pstyle.nature_layout(fig_tv, height=pstyle.HERO_HEIGHT)
+                    if use_demo:
+                        pstyle.add_demo_watermark(fig_tv)
                     st.plotly_chart(fig_tv, width="stretch", key="h_tv_map")
                 else:
                     st.caption("当前数据不足，无法生成该图。（颗粒温度—速度状态图需要粒子温度/速度列）")
@@ -1007,46 +1351,54 @@ with tab4:
                     dist_df["百分比（%）"] = (dist_df["样本数"] / dist_df["样本数"].sum() * 100).round(1)
                     fig_dist = px.bar(dist_df, x="熔融状态", y="样本数", color="熔融状态",
                                       title="颗粒熔融状态分布（类别来自数据/文献标签）",
-                                      text=dist_df["百分比（%）"].astype(str) + "%")
-                    fig_dist.update_layout(title_font_size=15, showlegend=False,
-                                           margin=dict(l=10, r=15, t=50, b=10))
+                                      text=dist_df["百分比（%）"].astype(str) + "%",
+                                      color_discrete_map=pstyle.discrete_map(list(dist_df["熔融状态"])))
+                    pstyle.nature_layout(fig_dist, height=pstyle.SUB_HEIGHT, legend=None)
+                    if use_demo:
+                        pstyle.add_demo_watermark(fig_dist)
                     st.plotly_chart(fig_dist, width="stretch", key="h_dist")
                 else:
                     st.caption("当前数据不足，无法生成该图。（熔融状态分布需要类别标签列）")
 
-                # 核心图 3：熔融模型评价（连续→Parity OOF；分类→混淆矩阵 OOF）
-                _cont15 = [t for t, k in kinds.items() if k == "regression" and t in oof15]
-                for t in _cont15:
-                    o = oof15[t].dropna()
-                    a = pd.to_numeric(d_an.loc[o.index, t], errors="coerce") if t in d_an.columns else None
-                    if a is None or a.notna().sum() < 2:
-                        st.caption(f"当前数据不足，无法生成 {zh(t)} 的 Parity 图。")
-                        continue
-                    met = m15.get(t) or {}
-                    fig_p = px.scatter(x=a, y=o, labels={"x": "实验值", "y": "OOF 预测值"},
-                                       title=f"{zh(t)}：实验值 vs OOF 预测值"
-                                             f"（R²={met.get('R2', float('nan')):.3f}）")
-                    _lo = float(min(a.min(), o.min())); _hi = float(max(a.max(), o.max()))
-                    fig_p.add_scatter(x=[_lo, _hi], y=[_lo, _hi], mode="lines",
-                                      line=dict(dash="dash", color="#777"), showlegend=False)
-                    fig_p.update_layout(title_font_size=14, margin=dict(l=10, r=15, t=50, b=10))
-                    st.plotly_chart(fig_p, width="stretch", key=f"h_parity_{t}")
-                _cat15 = [t for t, k in kinds.items() if k == "classification" and t in oof15]
-                for t in _cat15:
-                    o = oof15[t].dropna()
-                    if t not in d_an.columns:
-                        continue
-                    a_lab = d_an.loc[o.index, t].astype(str)
-                    p_lab = o.astype(str)
-                    classes = sorted(set(a_lab.unique()) | set(p_lab.unique()))
-                    cm = pd.crosstab(a_lab, p_lab).reindex(index=classes, columns=classes, fill_value=0)
-                    fig_cm = px.imshow(cm.values, x=classes, y=classes, text_auto=True,
-                                       labels={"x": "OOF 预测类别", "y": "真实类别"},
-                                       title=f"{zh(t)}：混淆矩阵（OOF，非训练集拟合值）")
-                    fig_cm.update_layout(title_font_size=14)
-                    st.plotly_chart(fig_cm, width="stretch", key=f"h_cm_{t}")
+                # 核心图 3：熔融模型评价（连续→Parity OOF；分类→混淆矩阵 OOF）——次级证据区
+                with st.expander("次级证据：熔融模型评价（Parity / 混淆矩阵，OOF）", expanded=False):
+                    _cont15 = [t for t, k in kinds.items() if k == "regression" and t in oof15]
+                    for t in _cont15:
+                        o = oof15[t].dropna()
+                        a = pd.to_numeric(d_an.loc[o.index, t], errors="coerce") if t in d_an.columns else None
+                        if a is None or a.notna().sum() < 2:
+                            st.caption(f"当前数据不足，无法生成 {zh(t)} 的 Parity 图。")
+                            continue
+                        met = m15.get(t) or {}
+                        _p_df = pd.DataFrame({"实验值": a.values, "OOF 预测值": o.values}).dropna()
+                        fig_p = pstyle.parity_chart(_p_df, x="实验值", y="OOF 预测值",
+                                                    x_label="实验值", y_label="OOF 预测值",
+                                                    title=f"{zh(t)}：实验值 vs OOF 预测值")
+                        pstyle.add_stat_note(fig_p, pstyle.stat_note(
+                            n=int(len(_p_df)), r2=met.get("R2"), rmse=met.get("RMSE"),
+                            mae=met.get("MAE"), cv_method=cvm))
+                        if use_demo:
+                            pstyle.add_demo_watermark(fig_p)
+                        st.plotly_chart(fig_p, width="stretch", key=f"h_parity_{t}")
+                    _cat15 = [t for t, k in kinds.items() if k == "classification" and t in oof15]
+                    for t in _cat15:
+                        o = oof15[t].dropna()
+                        if t not in d_an.columns:
+                            continue
+                        a_lab = d_an.loc[o.index, t].astype(str)
+                        p_lab = o.astype(str)
+                        classes = sorted(set(a_lab.unique()) | set(p_lab.unique()))
+                        cm = pd.crosstab(a_lab, p_lab).reindex(index=classes, columns=classes, fill_value=0)
+                        fig_cm = px.imshow(cm.values, x=classes, y=classes, text_auto=True,
+                                           labels={"x": "OOF 预测类别", "y": "真实类别"},
+                                           title=f"{zh(t)}：混淆矩阵（OOF，非训练集拟合值）",
+                                           color_continuous_scale="Blues")
+                        pstyle.nature_layout(fig_cm, height=pstyle.SUB_HEIGHT)
+                        if use_demo:
+                            pstyle.add_demo_watermark(fig_cm)
+                        st.plotly_chart(fig_cm, width="stretch", key=f"h_cm_{t}")
 
-                # 核心图 4/5：熔融 → 缺陷 / 性能（关联趋势，非因果）
+                # 核心图 4/5：熔融 → 缺陷 / 性能（关联趋势，非因果）——次级证据区
                 _melt_col = "melting_index" if "melting_index" in d_an.columns else \
                     ("melting_fraction_pct" if "melting_fraction_pct" in d_an.columns else None)
                 if _melt_col:
@@ -1070,11 +1422,14 @@ with tab4:
                         if _cdf.empty:
                             st.caption(f"当前数据不足，无法生成该图。（{_ttl}）")
                             continue
-                        fig_c = px.scatter(_cdf, x="_mx", y=list(_cdf.columns[1:]),
-                                           labels={"_mx": zh(_melt_col), "value": "指标值", "variable": "指标"},
-                                           title=_ttl)
-                        fig_c.update_layout(title_font_size=15, margin=dict(l=10, r=15, t=50, b=10))
-                        st.plotly_chart(fig_c, width="stretch", key=f"h_corr_{_tag}")
+                        with st.expander(f"次级证据：{_ttl}", expanded=False):
+                            fig_c = px.scatter(_cdf, x="_mx", y=list(_cdf.columns[1:]),
+                                               labels={"_mx": zh(_melt_col), "value": "指标值", "variable": "指标"},
+                                               title=_ttl)
+                            pstyle.nature_layout(fig_c, height=pstyle.SUB_HEIGHT)
+                            if use_demo:
+                                pstyle.add_demo_watermark(fig_c)
+                            st.plotly_chart(fig_c, width="stretch", key=f"h_corr_{_tag}")
                 else:
                     st.caption("当前数据不足，无法生成该图。（缺少 melting_index / melting_fraction_pct）")
 
@@ -1088,7 +1443,9 @@ with tab4:
                                              labels={"x": "粒子温度 / 材料熔点温度比",
                                                      "y": "样本数"},
                                              title="粒子温度 / 材料熔点温度比（归一化热状态指标，非熔融分数）")
-                        fig_r.update_layout(title_font_size=14, showlegend=False)
+                        pstyle.nature_layout(fig_r, height=pstyle.SUB_HEIGHT, legend=None)
+                        if use_demo:
+                            pstyle.add_demo_watermark(fig_r)
                         st.plotly_chart(fig_r, width="stretch", key="h_ratio")
                         st.caption("temperature_ratio = T_particle(K) / T_melting(K)，"
                                    "仅作为热状态归一化指标，不得解释为熔融分数。")
@@ -1101,16 +1458,19 @@ with tab4:
                     _pipe = _m15_models[_t0]
                     _imp = pd.Series(_pipe.named_steps["model"].feature_importances_,
                                      index=bundle.get("stage15_features") or []).sort_values(ascending=False).head(15)
-                    fig_i = px.bar(x=_imp.values[::-1], y=[zh(f) for f in _imp.index][::-1],
-                                   orientation="h",
-                                   labels={"x": "特征重要性", "y": "影响因素"},
-                                   title=f"影响{zh(_t0)}的因素（Stage 1.5 XGBoost 重要性 Top {len(_imp)}）")
-                    fig_i.update_layout(title_font_size=14, margin=dict(l=10, r=15, t=50, b=10))
+                    _imp_df = pd.DataFrame({"影响因素": [zh(f) for f in _imp.index],
+                                            "特征重要性": _imp.values})
+                    fig_i = pstyle.importance_chart(
+                        _imp_df, title=f"影响{zh(_t0)}的因素（Stage 1.5 XGBoost 重要性 Top {len(_imp)}）")
+                    if use_demo:
+                        pstyle.add_demo_watermark(fig_i)
                     st.plotly_chart(fig_i, width="stretch", key="h_imp")
 
-# ---------------- ⑥ 数据洞察与实验反馈（V1.5 新增） ----------------
+# ---------------- ⑥ 数据洞察与实验反馈（V1.5 新增；V1.6 证据徽标化） ----------------
+# ⚠️ tab 变量错位警示：tab5 = ⑥ 数据洞察、tab6 = ⑦ 逆向设计、tab7 = ⑧ 结果输出
 with tab5:
     st.subheader("数据洞察与实验反馈")
+    render_tab_header("tab5", CTX)
     st.caption("三源分级：【直接观测】实验/文献实测 ｜【模型推断】预测/SHAP/PDP ｜【优化建议】Pareto 与实验建议。"
                "model_prediction / optimization_candidate 不会参与真实事实统计，也不会自动进入训练集。")
     d_in = current_df()
@@ -1118,18 +1478,24 @@ with tab5:
         st.warning("请先在「数据管理」页加载数据。")
     else:
         if use_demo:
-            st.info(DEMO_RESULT_NOTICE)
+            evidence_mod.demo_banner()
 
         with st.container(border=True):
             st.markdown("**【直接观测】数据覆盖**")
+            _cov_stats = insight_mod.coverage_stats(d_in, schema)
             st.caption(insight_mod.coverage_text(d_in, schema))
-            cov_df = insight_mod.coverage_stats(d_in, schema)["coverage"]
+            # V1.6（P0-2）：direct 类证据徽标（界面态无 run registry，用轻量徽标展示关键数值）
+            st.markdown(evidence_mod.badge_span(
+                f"n={_cov_stats['n_fact']} ｜ 输入变量 {len(_cov_stats['coverage'])} 个"
+                + (f" ｜ 重复测量试样 {_cov_stats['repeat_samples']} 个"
+                   if _cov_stats.get("repeat_samples") else ""),
+                source_class="direct", demo=use_demo), unsafe_allow_html=True)
+            st.caption("计算方式：insights.coverage_stats（仅 experimental/literature/CFD 行参与事实统计）")
+            cov_df = _cov_stats["coverage"]
             if len(cov_df):
                 cov_disp = cov_df.copy()
                 cov_disp["变量"] = cov_disp["变量"].map(zh)
                 st.dataframe(cov_disp, width="stretch", hide_index=True)
-            if use_demo:
-                st.caption("提示：Demo 数据仅用于功能验证。")
 
         with st.container(border=True):
             st.markdown("**【直接观测】正向实验规律（相关趋势，非因果）**")
@@ -1139,8 +1505,14 @@ with tab5:
                 disp_corr["输入"] = disp_corr["输入"].map(zh)
                 disp_corr["输出"] = disp_corr["输出"].map(zh)
                 st.dataframe(disp_corr, width="stretch", hide_index=True)
-                st.caption("仅基于 experimental / literature / CFD 行计算；未做显著性检验，"
-                           "不使用统计意义上的“显著”，不构成因果结论。")
+                # V1.6（P0-2）：direct 类证据徽标（首位相关对真实数值）
+                _r0c = corr_df.iloc[0]
+                st.markdown(evidence_mod.badge_span(
+                    f"n={int(_r0c['n'])} ｜ Pearson={float(_r0c['Pearson']):+.3f}"
+                    f" ｜ Spearman={float(_r0c['Spearman']):+.3f}",
+                    source_class="direct", demo=use_demo), unsafe_allow_html=True)
+                st.caption("计算方式：insights.correlation_report；仅基于 experimental / literature / CFD 行计算；"
+                           "未做显著性检验，不使用统计意义上的“显著”，不构成因果结论。")
                 if st.button("生成科研解读（变量相关性）", key="ins_corr_an"):
                     md = analyze_figure(
                         "corr", target="变量相关性", n=int(len(d_in)),
@@ -1148,7 +1520,8 @@ with tab5:
                         spearman=float(corr_df.iloc[0]["Spearman"]),
                         trend_desc=f"数据显示 {zh(corr_df.iloc[0]['输入'])} 与 "
                                    f"{zh(corr_df.iloc[0]['输出'])} 之间存在相关趋势。",
-                        demo=use_demo)
+                        demo=use_demo,
+                        eid="fig.ins_corr_top", registry=None)  # 界面态无 run registry
                     st.markdown(md)
             else:
                 st.caption("当前数据量不足以计算稳定的相关趋势。")
@@ -1167,12 +1540,18 @@ with tab5:
                     imp_df["特征"] = imp_df["特征"].map(zh)
                     st.markdown(f"当前模型（{k0}）特征重要性 Top {len(imp_df)}：")
                     st.dataframe(imp_df, width="stretch", hide_index=True)
+                    # V1.6（P0-2）：model 类证据徽标（必须带 CV 方式限定）
+                    st.markdown(evidence_mod.badge_span(
+                        f"CV: {(b_in.get('chain_cv') or {}).get('method') or '—'} ｜ "
+                        f"Top1 {imp_df.iloc[0]['特征']}（{float(imp_df.iloc[0]['重要性']):.3f}）",
+                        source_class="model", demo=use_demo), unsafe_allow_html=True)
                     if stability:
                         st.markdown("**跨折稳定的重要变量**（模型中较稳定的重要变量）：")
                         st.caption("；".join(f"{zh(k)}（{v}）" for k, v in stability.items()))
                     else:
                         st.caption("（跨折特征重要性记录不足 3 折，稳定性统计暂缺）")
-                    st.caption("模型重要性仅表征统计关联（“在当前模型中……”），不构成因果关系。")
+                    st.caption("计算方式：insights.model_key_factors；模型重要性仅表征统计关联"
+                               "（“在当前模型中……”），不构成因果关系。")
                 else:
                     st.caption("当前模型无可用特征重要性（例如 GP / RF 目标）。")
 
@@ -1181,7 +1560,11 @@ with tab5:
             anom = insight_mod.anomaly_review(d_in, b_in)
             if len(anom):
                 st.dataframe(anom, width="stretch", hide_index=True)
-                st.caption("以上仅为复核建议；平台不会自动删除或修改任何数据。")
+                _a0 = anom.iloc[0]
+                st.markdown(evidence_mod.badge_span(
+                    f"复核建议 {len(anom)} 条 ｜ 首条：{_a0['对象']}（{_a0['目标']}）",
+                    source_class="direct", demo=use_demo), unsafe_allow_html=True)
+                st.caption("计算方式：insights.anomaly_review；以上仅为复核建议；平台不会自动删除或修改任何数据。")
             else:
                 st.caption("未检测到明显异常（或当前无模型 OOF 记录）。")
 
@@ -1190,7 +1573,11 @@ with tab5:
             gaps = insight_mod.data_gap_suggestions(d_in, schema, b_in)
             if len(gaps):
                 st.dataframe(gaps, width="stretch", hide_index=True)
-                st.caption("仅为数据采集建议（数据空白/稀疏/边界区）；最终实验方案由研究者确定。")
+                st.markdown(evidence_mod.badge_span(
+                    f"建议补充区域 {len(gaps)} 处（稀疏/边界/空白参数区）",
+                    source_class="direct", demo=use_demo), unsafe_allow_html=True)
+                st.caption("计算方式：insights.data_gap_suggestions；仅为数据采集建议，"
+                           "最终实验方案由研究者确定。")
             else:
                 st.caption("当前数据覆盖较均匀，暂无明显空白区建议。")
 
@@ -1200,8 +1587,10 @@ with tab5:
                        "model_prediction / optimization_candidate 永不自动进入训练集。")
 
 # ---------------- ⑦ 逆向设计 ----------------
+# ⚠️ tab 变量错位警示：tab6 = ⑦ 逆向设计
 with tab6:
     st.subheader("多目标工艺逆向设计")
+    render_tab_header("tab6", CTX)
     st.markdown("基于训练完成的三级代理模型，在设定工艺范围和工程约束条件下"
                 "搜索 Pareto 非支配工艺方案。")
     if get_bundle() is None:
@@ -1272,7 +1661,7 @@ with tab6:
                         _oh = st.slider("过热风险上限（overheating_risk ≤ x）", 0.0, 1.0, 0.5, 0.05, key="opt_oh")
                         melt_constraints["overheating_risk"] = {"max": float(_oh)}
 
-        if st.button("🧭 开始多目标逆向寻优", type="primary"):
+        if st.button("🧭 开始多目标逆向寻优"):
             with st.spinner("正在搜索 Pareto 工艺窗口..."):
                 _obj_call = {"objectives": obj_cfg.get("objectives", {}),
                              "constraints": {**obj_cfg.get("constraints", {}), **melt_constraints}}
@@ -1336,51 +1725,50 @@ with tab6:
                     st.caption("以上为当前模型与当前约束条件下的 Pareto 工艺参数范围。"
                                "本次搜索域为设备允许可行域（探索性），标记“存在外推风险”的方案为外推预测结果。")
 
-                # V1.5 spec 四十二/四十三：Pareto 证据支持 + 推荐依据（不编造机理）
+                # V1.5 spec 四十二/四十三 + V1.6 四段式：Pareto 证据支持收进次级证据区
                 d_ev = current_df()
                 if d_ev is not None:
                     ev = insight_mod.pareto_evidence(front, d_ev, bundle.get("training_domain") or {},
                                                      bundle, list(schema["process_inputs"].keys()),
                                                      max_rows=10)
                     if len(ev):
-                        st.markdown("**Pareto 方案证据支持**")
-                        st.dataframe(ev, width="stretch", hide_index=True)
-                        st.caption("数据支持程度与邻近实验来自训练数据（直接观测）；预测不确定性为模型输出"
-                                   "（模型推断）；证据不包含材料机理判断。")
-                        with st.expander("为什么推荐这个点（逐方案推荐依据）", expanded=False):
-                            for _i, evr in ev.iterrows():
-                                st.markdown(f"**{evr['方案']}**")
-                                st.caption(insight_mod.recommendation_basis(evr))
-                                st.markdown("---")
+                        with st.expander("次级证据：Pareto 方案证据支持（数据支持度 / 邻近实验 / 不确定性）",
+                                         expanded=False):
+                            st.dataframe(ev, width="stretch", hide_index=True)
+                            st.caption("数据支持程度与邻近实验来自训练数据（直接观测）；预测不确定性为模型输出"
+                                       "（模型推断）；证据不包含材料机理判断。")
+                            with st.expander("为什么推荐这个点（逐方案推荐依据）", expanded=False):
+                                for _i, evr in ev.iterrows():
+                                    st.markdown(f"**{evr['方案']}**")
+                                    st.caption(insight_mod.recommendation_basis(evr))
+                                    st.markdown("---")
 
                 PARETO_OUT.parent.mkdir(parents=True, exist_ok=True)
                 front.to_excel(PARETO_OUT, index=False)
                 st.caption(f"结果已自动导出：{PARETO_OUT.name}")
 
 # ---------------- ⑧ 结果输出 ----------------
+# ⚠️ tab 变量错位警示：tab7 = ⑧ 结果输出（tab5=⑥洞察、tab6=⑦逆向），勿按序号猜变量
 with tab7:
-    st.subheader("科研结果输出与论文图表")
-    st.markdown("将模型训练、预测、解释与多目标优化结果整理为可用于论文、组会及项目报告的标准图表和数据文件。")
-
+    render_tab_header("tab7", CTX)
     ensure_output_tree()
     bundle7 = get_bundle()
     if bundle7 is None:
         st.warning("请先在「模型训练」页完成训练。")
     else:
         if use_demo:
-            st.error("当前为模拟演示数据。以下图表仅用于测试软件功能，不得用于论文科研结论。")
+            evidence_mod.demo_banner()
 
         d7 = current_df()
-        man = bundle7.get("chain_cv") or {}
-        dv7 = ("auto_" + str(bundle7.get("dataset_hash"))[:8]) if bundle7.get("dataset_hash") else "未知（旧模型）"
+        # V1.6（P1-2）：指标区与 status-pill 同源去重——n/数据版本/模型版本/CV 均来自同一 CTX
         m11, m12, m13 = st.columns(3)
         m11.metric("当前数据集", "模拟数据" if use_demo else "真实数据")
-        m12.metric("数据版本", dv7)
-        m13.metric("模型版本", bundle7.get("model_version", "未知（旧模型）"))
+        m12.metric("数据版本", CTX.get("dataset_version") or "未知（旧模型）")
+        m13.metric("模型版本", CTX.get("model_version") or "未知（旧模型）")
         m21, m22, m23 = st.columns(3)
-        m21.metric("样本数", len(d7) if d7 is not None else "-")
+        m21.metric("样本数", CTX.get("sample_count") or (len(d7) if d7 is not None else "-"))
         m22.metric("独立批次数", d7["batch_id"].nunique() if d7 is not None and "batch_id" in d7 else "-")
-        m23.metric("交叉验证方法", "GroupKFold" if man else "-")
+        m23.metric("交叉验证方法", context_cv_short(CTX) if context_cv_short(CTX) != "—" else "-")
 
         lang = st.radio("图表语言", ["中文", "English"], horizontal=True)
         fmt = st.radio("图片格式", ["PNG", "SVG", "PNG + SVG"], horizontal=True)
@@ -1427,6 +1815,7 @@ with tab7:
                     st.success(f"论文图表包已生成：{run_dir.name}（图 {len(paths['figures'])} 张 / "
                                f"表 {len(paths['tables'])} 份 / 数据 {len(paths['data'])} 份 / "
                                f"元数据 {len(paths['metadata'])} 份）")
+                    st.caption("结果包内含证据清单（evidence_manifest.json），报告中每条结论均可按 eid 溯源到数据与模型版本。")
                     st.caption(f"目录：{run_dir}")
                     st.caption(f"摘要：{paths.get('summary', '')}")
                     if Path(zip_path).exists():
@@ -1446,7 +1835,7 @@ with tab7:
             ctop1.caption("一键生成 A–I 全部模块：数据概况 / 模型性能 / 可解释性 / 全链预测 / "
                           "Pareto / 不确定性 / 验证模板 / 熔融状态 / 数据洞察，"
                           "附图表科研解读（*_Analysis.md）、Insight_Report、元数据与 ZIP 打包。")
-            if ctop2.button("📦 生成完整科研结果包", type="primary", key="btn_bundle_top"):
+            if ctop2.button("📦 生成完整科研结果包", key="btn_bundle_top"):
                 _make_bundle()
         st.markdown("---")
 
@@ -1636,5 +2025,5 @@ with tab7:
                 st.info(f"快照保存失败：{friendly_error(e)}")
 
         st.markdown("---")
-        if st.button("📦 生成完整科研结果包", type="primary", key="btn_bundle"):
+        if st.button("📦 生成完整科研结果包", key="btn_bundle"):
             _make_bundle()
