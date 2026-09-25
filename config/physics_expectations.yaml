@@ -1,0 +1,33 @@
+# V1.7 L4 物理一致性检验 · 期望方向配置
+# 每条：{x: 自变量, y: 因变量, dir: 期望方向(正/负), basis: 物理依据}
+# 判定证据两类交叉验证：
+#   (a) 训练数据 Spearman 相关系数符号（直接观测，需 >= 8 对有效数据）；
+#   (b) 对应层级模型的 PDP（部分依赖）稳健线性拟合斜率符号（模型推断）。
+# 两者一致且符合期望 → PASS；仅一类支持 → WEAK；证据相反 → FAIL；两类均缺 → UNVERIFIED。
+# 变量为当前模式 schema 中的标准列名；在当前数据中不存在的条目自动判 UNVERIFIED，
+# 不会阻塞其他条目检验。用户可自行增删条目。
+expectations:
+  - x: anode1_current_A
+    y: jet_temperature_K
+    dir: 正
+    basis: 电流增大 → 等离子体放电功率升高 → 射流温度上升
+  - x: H2_flow_slpm
+    y: arc_voltage_V
+    dir: 正
+    basis: 氢气电离电位高、热导率高 → 掺氢提升电弧电压与焓值
+  - x: powder_feed_g_min
+    y: porosity_pct
+    dir: 正
+    basis: 送粉速率增大 → 未熔颗粒比例上升 → 涂层孔隙增多
+  - x: jet_temperature_K
+    y: porosity_pct
+    dir: 负
+    basis: 射流温度升高 → 颗粒熔融更充分 → 孔隙率下降
+  - x: particle_velocity_m_s
+    y: bond_strength_MPa
+    dir: 正
+    basis: 粒子速度越高 → 撞击铺展越充分 → 层间结合增强
+  - x: porosity_pct
+    y: coupled_damage_rate
+    dir: 正
+    basis: 孔隙为腐蚀/磨损介质提供通道 → 耦合损伤速率随孔隙率上升

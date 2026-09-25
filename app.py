@@ -32,6 +32,12 @@ from src import quick_analysis as qa
 from src.figure_analysis import analyze_figure
 from src import plot_style as pstyle          # V1.6：网页图表样式唯一来源
 from src import evidence as evidence_mod      # V1.6：全程可溯源（P0-2）
+# V1.7：核心价值验证体系（L1→L4，指令集逻辑的平台化落地）
+from src import calibration as calib_mod            # L1 不确定度校准
+from src import validation_tracker as vtrack_mod    # L2 推荐-验证闭环
+from src import benchmark as bench_mod              # L3 闭环效率基准
+from src import physics_check as phys_mod           # L4 物理一致性
+from src import core_value_report as cvr_mod        # L1-L4 汇总总报告
 
 st.set_page_config(page_title="双阳极等离子喷涂智能工艺设计平台", layout="wide")
 
@@ -207,7 +213,7 @@ section[data-testid="stSidebar"] * {font-size: 14.5px;}
 st.markdown("<style>" + _CSS_VARS + _CSS_BODY + "</style>", unsafe_allow_html=True)
 
 st.title("双阳极等离子喷涂智能工艺设计平台")
-st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 V1.6")
+st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 V1.7（核心价值验证 L1→L4）")
 
 
 # ---------------- 通用辅助 ----------------
@@ -709,6 +715,29 @@ with tab0:
     st.caption(f"研究模式：{CTX.get('research_mode_label')} ｜ 模型版本：{CTX.get('model_version') or '—'}"
                f" ｜ 状态与 ③ 模型训练 / ⑧ 结果输出 同源（同一 CTX）。")
 
+    # ---------------- V1.7 · 核心价值验证 L1→L4 状态徽标（首页概览） ----------------
+    _cv_status = cvr_mod.core_value_status()
+    _pill = {"L1": ("L1 校准", "③ 模型训练"), "L2": ("L2 推荐即命中", "⑥ 数据洞察"),
+             "L3": ("L3 闭环效率", "⑥ 数据洞察"), "L4": ("L4 物理一致", "⑤ 模型解析")}
+    _cols_cv = st.columns(4)
+    for _cc, (_lk, (_lt, _loc)) in zip(_cols_cv, _pill.items()):
+        _v = _cv_status["layers"].get(_lk) or {}
+        if _v.get("passed"):
+            _txt, _bg, _fg = f"✓ {_lt}", "#EAF3FB", "#3D5A78"
+        elif _v.get("done"):
+            _txt, _bg, _fg = f"△ {_lt}（未通过）", "#FFF5F6", "#B77C87"
+        else:
+            _txt, _bg, _fg = f"○ {_lt}（未运行）", "#F2F7FC", "#7A8290"
+        _cc.markdown(
+            f'<span class="status-pill" style="color:{_fg};background:{_bg};">{_txt} · {_loc}</span>',
+            unsafe_allow_html=True)
+    if _cv_status.get("deepest"):
+        st.caption(f"核心价值验证当前连续通过到：**{_cv_status['deepest']}** ｜ "
+                   "总报告在「⑧ 结果输出 → 核心价值验证总报告」；四层入口见上方徽标。")
+    else:
+        st.caption("核心价值验证（L1 校准 → L2 推荐即命中 → L3 闭环效率 → L4 物理一致）尚未有通过的层级；"
+                   "建议从「③ 模型训练 → L1 校准」开始逐层补齐证据。")
+
     if use_demo and d is not None:
         evidence_mod.demo_banner()
 
@@ -1061,6 +1090,81 @@ with tab2:
             elif bundle.get("stage15_enabled") is False:
                 st.caption("当前数据缺少颗粒熔融状态标签，Stage 1.5 未启用。")
 
+        # ---------------- V1.7 · L1 不确定度校准（核心价值验证第一层） ----------------
+        st.markdown("---")
+        with st.container(border=True):
+            st.markdown("**L1 · 不确定度校准（模型给出的 σ 是否可信）**")
+            st.caption("带 σ 的全链交叉验证（折划分规则与平台全链 CV 一致）→ 逐目标 1σ/2σ 实际覆盖率"
+                       "（期望 ≈68% / ≈95%）→ 校准因子。校准后工艺预测与逆向设计的 σ 自动乘以该因子；"
+                       "这是 L2 命中判定与 L3 悲观惩罚的基础。")
+            _cal_status = calib_mod.calibration_status()
+            if _cal_status.get("done"):
+                st.markdown(evidence_mod.badge_span(
+                    f"已校准 ｜ {_cal_status['n_targets']} 目标（校准良好 {_cal_status['n_good']}）"
+                    f" ｜ {_cal_status['generated_at']}",
+                    source_class="model", demo=use_demo), unsafe_allow_html=True)
+            _d_cal = current_df()
+            if _d_cal is None:
+                st.info("请先在「② 数据管理」加载数据后再运行校准。")
+            elif st.button("▶ 运行 L1 校准（约 1–2 分钟）", type="primary", key="cal_run"):
+                _prog = st.status("L1 校准运行中（带 σ 全链交叉验证）…", expanded=True)
+                _cal_lines = []
+
+                def _cal_cb(name, frac=None):
+                    _cal_lines.append(f"· {name}")
+                    _prog.write("\n".join(_cal_lines[-10:]))
+
+                try:
+                    _cal_res = calib_mod.run_calibration(_d_cal, schema,
+                                                         progress_cb=lambda n, f=None: _cal_cb(n))
+                    _rows_cal = []
+                    for t, info in _cal_res["targets"].items():
+                        if "cov_1sigma" in info:
+                            _rows_cal.append({
+                                "性能目标": zh(t), "有效 n": info["n"],
+                                "1σ 覆盖率": f"{info['cov_1sigma']*100:.1f}%",
+                                "2σ 覆盖率": f"{info['cov_2sigma']*100:.1f}%",
+                                "z 方差": info["z_var"], "校准因子 k": info["factor"],
+                                "判定": info["verdict"]})
+                        else:
+                            _rows_cal.append({"性能目标": zh(t), "有效 n": info.get("n", 0),
+                                              "判定": info.get("verdict", "样本不足")})
+                    _prog.update(label="L1 校准完成", state="complete")
+                    st.dataframe(pd.DataFrame(_rows_cal), width="stretch", hide_index=True)
+                    # 校准曲线（网页交互版，plotly 统一模板）
+                    import plotly.graph_objects as go
+                    _fig_cal = go.Figure()
+                    _ok_t = [t for t, i in _cal_res["targets"].items() if "cov_1sigma" in i]
+                    for _i, _t in enumerate(_ok_t):
+                        _nom, _act = calib_mod.calibration_curve_points(
+                            _cal_res["oof_with_std"], _t)
+                        if _nom is None:
+                            continue
+                        _fig_cal.add_trace(go.Scatter(
+                            x=_nom, y=_act, mode="lines+markers", name=zh(_t),
+                            line=dict(color=pstyle.QUAL_CYCLE[_i % len(pstyle.QUAL_CYCLE)], width=2),
+                            marker=dict(size=4)))
+                    _fig_cal.add_trace(go.Scatter(
+                        x=[0, 100], y=[0, 100], mode="lines", name="理想校准线",
+                        line=dict(color=pstyle.GRAY_REF, width=1.5, dash="dash")))
+                    pstyle.nature_layout(_fig_cal, title="校准曲线（名义置信度 vs 实际覆盖率）",
+                                         height=400)
+                    _fig_cal.update_xaxes(title_text="名义置信度 / %", range=[0, 100])
+                    _fig_cal.update_yaxes(title_text="实际覆盖率 / %", range=[0, 100])
+                    st.plotly_chart(_fig_cal, width="stretch", key="cal_curve_fig")
+                    st.markdown(evidence_mod.badge_span(
+                        " ".join(f"{zh(t)}: 1σ={i['cov_1sigma']*100:.0f}%, k={i['factor']:.2f}"
+                                 for t, i in _cal_res["targets"].items() if "cov_1sigma" in i),
+                        source_class="model", demo=use_demo), unsafe_allow_html=True)
+                    st.caption("计算方式：calibration.run_calibration（带 σ 全链 CV，折外预测）；"
+                               "因子已写入 models/calibration.json，④ 工艺预测 / ⑦ 逆向设计 / "
+                               "L3 效率基准的 σ 自动乘以该因子。完整报告：outputs/calibration/校准报告.md")
+                    if use_demo:
+                        evidence_mod.demo_banner()
+                except Exception as e:
+                    _prog.update(label="L1 校准失败", state="error")
+                    st.error(friendly_error(e, _d_cal, schema))
+
 # ---------------- ④ 工艺预测 ----------------
 with tab3:
     st.subheader("单组工艺参数全链预测")
@@ -1163,6 +1267,12 @@ with tab3:
                     X = pd.DataFrame([vals])
                     states, defects, perf, unc, melt = predict_chain(X, bundle, return_melting=True)
                     std_map = unc.iloc[0].to_dict() if len(unc.columns) else {}
+                    # V1.7（L1 联动）：σ 乘 L1 校准因子（无校准文件时因子=1，显示不变）
+                    _cal_factors = calib_mod.load_factors()
+                    if _cal_factors:
+                        std_map = {k: (v * _cal_factors.get(k[:-4], 1.0) if isinstance(v, (int, float))
+                                       and k.endswith("_std") and np.isfinite(v) else v)
+                                   for k, v in std_map.items()}
                     log_event("predict", f"mode={MODE_ID} inputs={ {k: round(float(v), 2) for k, v in vals.items()} }")
 
                     st.markdown("**【第一阶段：射流与粒子状态】**")
@@ -1199,6 +1309,10 @@ with tab3:
                     st.markdown("**【第三阶段：涂层性能】**")
                     st.dataframe(stage_result_table(bundle["perf_cols"], perf.iloc[0], std_map),
                                  width="stretch", hide_index=True)
+                    if _cal_factors:
+                        _k_show = "、".join(f"{zh(t)} k={k:.2f}" for t, k in _cal_factors.items())
+                        st.caption(f"σ 已按 L1 校准因子修正（{_k_show}）；"
+                                   "校准来自带 σ 的全链交叉验证（③ 模型训练 → L1）。")
 
                     # V1.5 spec 四十一 + V1.6 四段式：历史数据参考收进次级证据区
                     with st.expander("次级证据：历史数据参考（最近 3–5 个真实实验/文献数据）",
@@ -1466,6 +1580,64 @@ with tab4:
                         pstyle.add_demo_watermark(fig_i)
                     st.plotly_chart(fig_i, width="stretch", key="h_imp")
 
+        # ---------------- V1.7 · L4 物理一致性检验（核心价值验证第四层） ----------------
+        st.markdown("---")
+        with st.container(border=True):
+            st.markdown("**L4 · 物理一致性检验（模型规律是否符合喷涂物理）**")
+            st.caption("对每条物理期望（config/physics_expectations.yaml，可自定义）做两类证据交叉验证："
+                       "① 事实行 Spearman 相关符号（直接观测）；② 对应层级模型 PDP 部分依赖曲线的"
+                       " Theil-Sen 稳健斜率符号（模型推断）。一致且符合期望 → PASS；仅一类 → WEAK；"
+                       "相反 → FAIL（附原因分析与补实验建议）。")
+            _ph_st = phys_mod.physics_status()
+            if _ph_st.get("done"):
+                _s = _ph_st["summary"]
+                st.markdown(evidence_mod.badge_span(
+                    f"可检验 {_s['n_checkable']} 条：PASS {_s['PASS']} ｜ WEAK {_s['WEAK']}"
+                    f" ｜ FAIL {_s['FAIL']} ｜ {_ph_st['generated_at']}",
+                    source_class="model", demo=use_demo), unsafe_allow_html=True)
+            if st.button("▶ 运行 L4 物理一致性检验", type="primary", key="phys_run"):
+                _d_ph = current_df()
+                if _d_ph is None:
+                    st.info("请先在「② 数据管理」加载数据。")
+                else:
+                    try:
+                        with st.spinner("逐条计算 Spearman 与 PDP 稳健斜率…"):
+                            _ph_res = phys_mod.run_physics_check(_d_ph, bundle, schema)
+                        rows_ph = []
+                        for v in _ph_res["verdicts"]:
+                            rows_ph.append({
+                                "#": v["idx"] + 1,
+                                "物理期望": f"{zh(v['x'])} → {zh(v['y'])}（期望{v['dir']}）",
+                                "Spearman ρ": (f"{v['spearman']:+.2f}" if v["spearman"] is not None else "不可用"),
+                                "n": v["n_pairs"] or "—",
+                                "PDP 斜率": (f"{v['pdp_slope']:+.3g}" if v["pdp_slope"] is not None else "不可用"),
+                                "判定": v["verdict"],
+                            })
+                        st.dataframe(pd.DataFrame(rows_ph), width="stretch", hide_index=True)
+                        _s = _ph_res["summary"]
+                        st.markdown(evidence_mod.badge_span(
+                            f"n={_s['n_checkable']} 可检验 ｜ PASS {_s['PASS']} ｜ WEAK {_s['WEAK']}"
+                            + (f" ｜ 通过率 {_s['pass_ratio']*100:.0f}%" if _s["pass_ratio"] is not None else ""),
+                            source_class="model", demo=use_demo), unsafe_allow_html=True)
+                        st.caption("计算方式：physics_check.run_physics_check；数据证据仅统计"
+                                   " experimental / literature / CFD 事实行；模型证据对 GPR / RF / XGBoost "
+                                   "统一采用 PDP（GPR 无 TreeSHAP 的严谨替代）。"
+                                   "完整报告：outputs/physics/物理一致性报告.md（含 FAIL 原因与补实验建议）")
+                        _fails = [v for v in _ph_res["verdicts"] if v["verdict"] == "FAIL"]
+                        if _fails:
+                            with st.expander(f"FAIL 条目原因分析与补实验建议（{len(_fails)} 条）",
+                                             expanded=True):
+                                for v in _fails:
+                                    st.markdown(f"**{zh(v['x'])} → {zh(v['y'])}**")
+                                    for _n_ in v["notes"]:
+                                        st.caption(f"可能原因：{_n_}")
+                                    for _a_ in v["advice"]:
+                                        st.caption(f"补实验建议：{_a_}")
+                        if use_demo:
+                            evidence_mod.demo_banner()
+                    except Exception as e:
+                        st.error(friendly_error(e, current_df(), schema))
+
 # ---------------- ⑥ 数据洞察与实验反馈（V1.5 新增；V1.6 证据徽标化） ----------------
 # ⚠️ tab 变量错位警示：tab5 = ⑥ 数据洞察、tab6 = ⑦ 逆向设计、tab7 = ⑧ 结果输出
 with tab5:
@@ -1585,6 +1757,146 @@ with tab5:
             st.caption(f"data_origin 分布：{d_in['data_origin'].value_counts().to_dict()} — "
                        "仅 experimental / literature / CFD 行参与事实统计；"
                        "model_prediction / optimization_candidate 永不自动进入训练集。")
+
+        # ---------------- V1.7 · L2 推荐-验证闭环（核心价值验证第二层） ----------------
+        st.markdown("---")
+        with st.container(border=True):
+            st.markdown("**L2 · 推荐-验证闭环（推荐即命中）**")
+            _l2_flow = [
+                ("1 导出任务单", "⑦ 逆向设计寻优后点击「导出验证任务单」"),
+                ("2 安排实验", "按任务单中的推荐工艺参数做喷涂实验"),
+                ("3 回填实测值", "在任务单 Excel 的状态/缺陷/性能列填入实测值"),
+                ("4 上传判定", "在下方上传，自动判定 |实测-预测| ≤ k·σ_cal 命中"),
+            ]
+            _fcols = st.columns(4)
+            for _fc, (_ft, _fd) in zip(_fcols, _l2_flow):
+                _fc.markdown(f'<div class="flow-card"><h4>{_ft}</h4><p>{_fd}</p></div>',
+                             unsafe_allow_html=True)
+            _vt_st = vtrack_mod.validation_status()
+            if _vt_st.get("done"):
+                _h1 = _vt_st.get("last_hit_1sigma")
+                st.markdown(evidence_mod.badge_span(
+                    f"已判定 {_vt_st['n_rounds']} 轮 ｜ 最新 1σ 命中率 "
+                    + (f"{_h1*100:.0f}%" if _h1 is not None else "待填写")
+                    + f" ｜ {_vt_st['last_judged_at']}",
+                    source_class="direct", demo=use_demo), unsafe_allow_html=True)
+            _vt_file = st.file_uploader("上传已填实测值的验证任务单（Excel）",
+                                        type=["xlsx"], key="vt_upload")
+            if _vt_file is not None and st.button("▶ 判定推荐命中率", type="primary",
+                                                   key="vt_judge"):
+                try:
+                    _vt_df = pd.read_excel(_vt_file, sheet_name=0)
+                    with st.spinner("匹配候选预测并逐目标判定…"):
+                        _vt_rep = vtrack_mod.judge_validation(_vt_df, demo=use_demo)
+                    if _vt_rep.get("hit_rate_1sigma") is not None:
+                        _r1, _r2 = _vt_rep["hit_rate_1sigma"], _vt_rep["hit_rate_2sigma"]
+                        st.success(f"本轮判定 {_vt_rep['n_judged_pairs']} 个目标-样本对："
+                                   f"1σ 命中率 {_r1*100:.0f}% ｜ 2σ 命中率 {_r2*100:.0f}%")
+                        st.markdown(evidence_mod.badge_span(
+                            f"1σ 命中 {_r1*100:.0f}% ｜ 2σ 命中 {_r2*100:.0f}%"
+                            f" ｜ 判定对数 {_vt_rep['n_judged_pairs']}",
+                            source_class="direct", demo=use_demo), unsafe_allow_html=True)
+                        if _r1 < 0.6:
+                            _wt = _vt_rep.get("worst_target")
+                            _wt_txt = f"（偏差最大目标：{zh(_wt)}）" if _wt else ""
+                            st.warning(f"1σ 命中率低于 60%{_wt_txt}：建议检查 L1 校准因子是否已应用、"
+                                       "偏差最大目标在稀疏参数区域补充实验，并把逆向设计候选的悲观惩罚收紧。")
+                    else:
+                        st.info("本轮没有可判定记录：任务单中的实测值尚未填写（或 σ 不可用）。"
+                                "填写后重新上传即可，不做任何编造判定。")
+                    if _vt_rep.get("n_pending"):
+                        st.warning(f"{_vt_rep['n_pending']} 条 REC 记录未匹配到候选存档"
+                                   "（可能使用了被清理的旧任务单）。")
+                    st.caption("判定基准：candidates 存档的校准后预测均值 ± σ_cal；"
+                               "σ 不可用或实测缺失的记录如实标记待填写。"
+                               "报告：outputs/validation/验证命中率报告.md；判定完成后核心价值总报告自动更新。")
+                    if use_demo:
+                        evidence_mod.demo_banner()
+                except Exception as e:
+                    st.error(friendly_error(e, None, schema))
+
+        # ---------------- V1.7 · L3 闭环效率基准（核心价值验证第三层） ----------------
+        with st.expander("L3 · 闭环效率基准对比（模型引导 vs 随机试错，核心价值主证据）",
+                         expanded=False):
+            st.caption("重放模拟竞赛：同一初始子集出发，模型引导策略（悲观惩罚 + 综合最优选点）与"
+                       "随机基线每轮各补 5 个点，比较达到目标规格所需实验次数。"
+                       "真实标签全部取自当前数据集（严禁以模型预测冒充真值）。")
+            _d_bm = current_df()
+            _b_in = get_bundle()
+            if _d_bm is None or _b_in is None:
+                st.info("需要已加载的数据与已训练的模型。")
+            else:
+                _spec_cols = st.columns(3)
+                _bm_spec = {}
+                for _i, (_t, _key, _dir) in enumerate([
+                        ("porosity_pct", "max", "≤"), ("bond_strength_MPa", "min", "≥"),
+                        ("coupled_damage_rate", "max", "≤")]):
+                    _def = bench_mod.DEFAULT_SPEC[_t][_key]
+                    _bm_spec[_t] = {_key: float(_spec_cols[_i].number_input(
+                        f"{zh(_t)} {_dir}", min_value=0.0, max_value=1e4,
+                        value=float(_def), step=0.1, key=f"bm_spec_{_t}"))}
+                _bm_c1, _bm_c2, _bm_c3 = st.columns(3)
+                _bm_init = int(_bm_c1.number_input("初始样本数", 10, 40, 15, key="bm_init"))
+                _bm_batch = int(_bm_c2.number_input("每轮补点数", 3, 10, 5, key="bm_batch"))
+                _bm_seeds = int(_bm_c3.selectbox("随机种子数", [3, 5, 10], index=1, key="bm_seeds"))
+                st.caption(f"演示数据 280 行约需 {_bm_seeds} × 1–2 分钟；种子越多结论越稳。")
+                if st.button("▶ 运行 L3 效率基准", type="primary", key="bm_run"):
+                    _prog = st.status("L3 重放竞赛运行中…", expanded=True)
+                    _bm_lines = []
+
+                    def _bm_cb(name, frac=None):
+                        _bm_lines.append(f"· {name}")
+                        _prog.write("\n".join(_bm_lines[-10:]))
+
+                    try:
+                        with st.spinner(""):
+                            _bm_res = bench_mod.run_benchmark(
+                                _d_bm, schema, spec=_bm_spec, n_init=_bm_init,
+                                n_batch=_bm_batch, n_seeds=_bm_seeds, progress_cb=_bm_cb)
+                        if _bm_res.get("feasible"):
+                            _sv = _bm_res["saved_experiments"]
+                            _g_m, _r_m = _bm_res["guided_median_steps"], _bm_res["random_median_steps"]
+                            if _sv is not None and _sv > 0:
+                                st.success(f"达到目标规格：模型引导 {_g_m:.0f} 次 vs 随机 {_r_m:.0f} 次"
+                                           f"（中位数，{_bm_seeds} 种子）——平均节省 {_sv:.0f} 次实验。")
+                            else:
+                                st.warning("模型引导未跑赢随机基线，详见下方解释与排查建议。")
+                            st.markdown(evidence_mod.badge_span(
+                                f"引导中位 {_g_m} ｜ 随机中位 {_r_m}"
+                                + (f" ｜ 节省 {_sv} 次" if _sv is not None else "")
+                                + f" ｜ 达标点占比 {_bm_res['n_ok_ratio']*100:.0f}%",
+                                source_class="model", demo=use_demo), unsafe_allow_html=True)
+                            # 网页版对比曲线（plotly 统一模板）
+                            import plotly.graph_objects as _go
+                            _fig_bm = _go.Figure()
+                            for _curves, _color, _label in (
+                                    (_bm_res["random_curves"], pstyle.GRAY_MUTED, "随机基线"),
+                                    (_bm_res["guided_curves"], pstyle.BLUE_SIGNAL, "模型引导")):
+                                _grid, _mean, _std = bench_mod._curve_stats(_curves)
+                                _fig_bm.add_trace(_go.Scatter(
+                                    x=_grid, y=_mean, mode="lines", name=_label,
+                                    line=dict(color=_color, width=2.5)))
+                                _fig_bm.add_trace(_go.Scatter(
+                                    x=np.concatenate([_grid, _grid[::-1]]),
+                                    y=np.concatenate([np.clip(_mean - _std, 0, None), (_mean + _std)[::-1]]),
+                                    fill="toself", fillcolor=_color, opacity=0.12,
+                                    line=dict(width=0), name=f"{_label} ±1σ", showlegend=False))
+                            pstyle.nature_layout(_fig_bm, title="闭环效率对比（累计实验次数 vs 归一化超体积）",
+                                                 height=380)
+                            _fig_bm.update_xaxes(title_text="累计实验次数")
+                            _fig_bm.update_yaxes(title_text="归一化超体积（MC 估计）")
+                            st.plotly_chart(_fig_bm, width="stretch", key="bm_curve_fig")
+                            st.info(_bm_res["explanation"])
+                            st.caption("计算方式：benchmark.run_benchmark；论文级曲线已存 "
+                                       "outputs/benchmark/闭环效率对比.png；报告：效率对比报告.md。"
+                                       "真实标签全部来自数据集重放，非模型预测。")
+                        else:
+                            st.warning(_bm_res["explanation"])
+                        if use_demo:
+                            evidence_mod.demo_banner()
+                    except Exception as e:
+                        _prog.update(label="L3 运行失败", state="error")
+                        st.error(friendly_error(e, _d_bm, schema))
 
 # ---------------- ⑦ 逆向设计 ----------------
 # ⚠️ tab 变量错位警示：tab6 = ⑦ 逆向设计
@@ -1747,6 +2059,38 @@ with tab6:
                 front.to_excel(PARETO_OUT, index=False)
                 st.caption(f"结果已自动导出：{PARETO_OUT.name}")
 
+                # ---------------- V1.7 · L2 联动：导出验证任务单（推荐即命中入口） ----------------
+                st.markdown("---")
+                with st.container(border=True):
+                    st.markdown("**导出验证任务单（L2 推荐-验证闭环第 1 步）**")
+                    st.caption("从前沿取 Top-N 推荐候选生成实验任务单（输入参数已预填、状态/缺陷/性能列"
+                               "留空待实验填写、experiment_id 按 REC- 编号）。实验完成后回「⑥ 数据洞察 → "
+                               "推荐-验证闭环」上传判定命中率；任务单格式与平台数据模板同构，也可在"
+                               "「② 数据管理」直接并入训练数据。")
+                    _vt_n = st.number_input("导出候选数（Top N）", 3, 20, 8, key="vt_n")
+                    if st.button("⬆ 导出验证任务单", type="primary", key="vt_export"):
+                        try:
+                            _vt_path, _vt_ver, _vt_cand = vtrack_mod.export_validation_sheet(
+                                front, schema, n_top=int(_vt_n), bundle=bundle, demo=use_demo)
+                            st.success(f"验证任务单已导出：{_vt_path.name}")
+                            st.caption(f"版本号 {_vt_ver} ｜ 实际导出 {len(_vt_cand)} 个候选"
+                                       + (f"（前沿共 {len(front)} 个方案，请求 Top {_vt_n}）"
+                                          if len(_vt_cand) < _vt_n else "")
+                                       + f" ｜ 候选预测存档：outputs/validation/candidates_{_vt_ver}.csv（判定基准）。")
+                            with open(_vt_path, "rb") as _f:
+                                st.download_button("⬇ 下载验证任务单（Excel）", _f,
+                                                   file_name=_vt_path.name,
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                   key="vt_download")
+                            _cal_f = calib_mod.load_factors()
+                            st.caption(("σ 已按 L1 校准因子修正（k 见 ③ 模型训练 → L1）。"
+                                        if _cal_f else "当前无 L1 校准文件，σ 因子=1；"
+                                        "建议先运行校准使命中判定更可信。"))
+                            if use_demo:
+                                evidence_mod.demo_banner()
+                        except Exception as e:
+                            st.error(friendly_error(e, current_df(), schema))
+
 # ---------------- ⑧ 结果输出 ----------------
 # ⚠️ tab 变量错位警示：tab7 = ⑧ 结果输出（tab5=⑥洞察、tab6=⑦逆向），勿按序号猜变量
 with tab7:
@@ -1774,6 +2118,29 @@ with tab7:
         fmt = st.radio("图片格式", ["PNG", "SVG", "PNG + SVG"], horizontal=True)
         plang = "zh" if lang == "中文" else "en"
         pformats = {"PNG": ("png",), "SVG": ("svg",), "PNG + SVG": ("png_svg",)}[fmt]
+
+        # ---------------- V1.7 · 核心价值验证总报告（L1→L4 汇总） ----------------
+        st.markdown("---")
+        with st.container(border=True):
+            st.markdown("**核心价值验证总报告（L1→L4 汇总）**")
+            st.caption("汇总四层验证证据：L1 不确定度校准 → L2 推荐即命中 → L3 闭环效率 → "
+                       "L4 物理一致性；一页式结论回答「平台核心价值通过到哪层、还缺哪条证据、"
+                       "下一步做什么实验」。缺失层明确写「暂无证据」，不编造。")
+            if st.button("▶ 生成 / 刷新核心价值验证总报告", type="primary", key="cvr_gen"):
+                try:
+                    with st.spinner("汇总 L1–L4 产物…"):
+                        _cvr_path, _ = cvr_mod.generate_core_value_report(
+                            trigger="⑧ 结果输出 · 手动生成")
+                    st.success(f"总报告已生成：{_cvr_path}")
+                    st.markdown(_cvr_path.read_text(encoding="utf-8"))
+                    with open(_cvr_path, "rb") as _f:
+                        st.download_button("⬇ 下载总报告（Markdown）", _f,
+                                           file_name=_cvr_path.name, key="cvr_download")
+                except Exception as e:
+                    st.error(friendly_error(e, current_df(), schema))
+            else:
+                if cvr_mod.REPORT_PATH.exists():
+                    st.caption(f"已有总报告：{cvr_mod.REPORT_PATH.name}（点击上方按钮刷新 / 预览）。")
 
         def _run_dir():
             ts = st.session_state.get("out_run_ts")

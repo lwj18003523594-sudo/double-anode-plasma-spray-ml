@@ -1,0 +1,160 @@
+classDiagram
+    direction LR
+
+    class plot_style {
+        <<module · 新增>>
+        +GRAY_INK : str = "#2F3440"
+        +GRAY_MUTED : str = "#7A8290"
+        +GRAY_BORDER : str = "#E5E9EF"
+        +GRAY_PAPER : str = "#FAFBFC"
+        +GRAY_REF : str = "#98A2B3"
+        +BLUE_SIGNAL : str = "#3C6E9F"
+        +BLUE_MID : str = "#6B93BF"
+        +BLUE_LIGHT : str = "#A9C9E5"
+        +BLUE_FAINT : str = "#EAF3FB"
+        +PINK_ACCENT : str = "#C4707F"
+        +PINK_MID : str = "#DB9AA6"
+        +PINK_LIGHT : str = "#E8B8C0"
+        +SEM_GOOD : str = "#6FA57C"
+        +SEM_BAD : str = "#C47070"
+        +QUAL_CYCLE : list~str~
+        +WEB_FONT : str
+        +HERO_HEIGHT : int = 460
+        +SUB_HEIGHT : int = 340
+        +blue_ramp(n) list~str~
+        +register_nature_template() None
+        +nature_layout(fig, title, height, width, margin, legend, showlegend) Figure
+        +apply_series_colors(fig, series_names, family) Figure
+        +parity_chart(df, x, y, x_label, y_label, title, identity) Figure
+        +importance_chart(imp_df, title, x_label) Figure
+        +stat_note(n, r2, rmse, mae, cv_method, errbar, extra) str
+        +add_stat_note(fig, note, position) Figure
+        +add_demo_watermark(fig) Figure
+        +fig_download_row(fig, data_df, stem, key) None
+    }
+
+    class EvidenceItem {
+        <<dataclass · 新增>>
+        +eid : str
+        +text : str
+        +source_class : str
+        +values : dict
+        +computed_by : str
+        +data_version : str
+        +model_version : str
+        +rows_filter : str
+        +files : list~str~
+        +demo : bool
+        +degraded : bool
+        +created_at : str
+    }
+
+    class EvidenceRegistry {
+        <<新增>>
+        -run_id : str
+        -run_dir : Path
+        -demo : bool
+        -data_version : str
+        -model_version : str
+        -_items : dict~str, EvidenceItem~
+        +statement(eid, template, source_class, computed_by, values, required, rows_filter, files) str
+        +register(item) None
+        +get(eid) EvidenceItem
+        +items() list~EvidenceItem~
+        +save(run_dir) Path
+        +load(run_dir)$ EvidenceRegistry
+    }
+
+    class evidence_ui {
+        <<module · 新增>>
+        +SOURCE_CLASS_LABEL : dict
+        +DEGRADE_TEXT : str = "当前数据不足以支持该判断"
+        +badge_html(item, run_id) str
+        +badge_row(sentence, item, key) None
+        +legacy_run_notice() None
+        +demo_banner() None
+    }
+
+    class quick_analysis {
+        <<module · 修改>>
+        +QUICK_ROOT : Path
+        +run_quick_analysis(df, sheet_name, run_id, confirm_map, progress_cb, demo) dict
+        +quick_analyze_file(file_or_path, run_prefix, progress_cb, demo) list~dict~
+        +data_readiness_issues(df, schema) tuple
+        +latest_runs(n) list~dict~
+        +promote_to_formal(run_id, mode_id) Path
+        +build_smart_summary(bundle, schema, extras, demo, run_id) dict
+        +load_smart_summary(run_id) dict
+    }
+
+    class SmartSummary {
+        <<dict 结构 · summary.json>>
+        +header : dict
+        +stage_metrics : list~dict~
+        +top_features : list~tuple~
+        +coverage : str
+        +pareto : int
+        +conclusions : list~EvidenceItem~
+        +readiness : dict
+    }
+
+    class insights {
+        <<module · 修改>>
+        +coverage_stats(df, schema) dict
+        +coverage_text(df, schema) str
+        +correlation_report(df, schema, max_pairs) DataFrame
+        +model_key_factors(bundle, topn) tuple
+        +anomaly_review(df, bundle) DataFrame
+        +data_gap_suggestions(df, schema, bundle) DataFrame
+        +build_insight_report(ctx, df, schema, bundle, out_dir, registry) tuple
+    }
+
+    class figure_analysis {
+        <<module · 修改>>
+        +analyze_figure(kind, target, n, r2, rmse, ..., eid, registry) str
+        +write_analysis_md(fig_path_base, md_text) Path
+        +summarize_analyses(analysis_dir) Path
+    }
+
+    class PaperExporter {
+        <<修改>>
+        +build_bundle(n_candidates) tuple
+        +fig_parity(stage, target) list
+        +fig_h_tv_map() list
+        ...
+    }
+
+    class paper_style {
+        <<模块 · 修改>>
+        +SINGLE_COL_IN : float
+        +DOUBLE_COL_IN : float
+        +ONE_HALF_COL_IN : float
+        +apply_paper_style(lang) None
+        +add_stat_box(ax, note, loc) None
+        +add_demo_watermark(fig, lang) None
+        +save_figure(fig, stem, figures_dir, formats, lang, demo) list
+    }
+
+    class app_py {
+        <<app.py · 表层重构>>
+        +render_tab_header(tab_key, ctx) None
+        +render_step_indicator() None
+        +render_smart_summary(run_id) None
+    }
+
+    EvidenceRegistry "1" o-- "*" EvidenceItem : 注册管理
+    evidence_ui ..> EvidenceItem : 徽标渲染
+    quick_analysis ..> EvidenceRegistry : 创建并传递
+    quick_analysis ..> SmartSummary : build/load
+    quick_analysis ..> insights : _insights 步骤
+    quick_analysis ..> PaperExporter : _package 步骤
+    insights ..> EvidenceRegistry : statement 生成结论
+    figure_analysis ..> EvidenceRegistry : 图级证据注册
+    app_py ..> quick_analysis : quick_analyze_file 契约
+    app_py ..> evidence_ui : badge_row / legacy_run_notice
+    app_py ..> plot_style : 统一图入口
+    paper_style ..> plot_style : import 色板常量
+    PaperExporter ..> paper_style : 版式与保存
+    PaperExporter ..> plot_style : import 色板常量
+    PaperExporter ..> figure_analysis : _analysis_for
+    app_py ..> paper_style : 不直接依赖

@@ -1,0 +1,54 @@
+sequenceDiagram
+    autonumber
+    actor User as 用户
+    participant app as app.py ① 首页<br/>(智能操作区)
+    participant step as 三步指示器<br/>(smart_step)
+    participant qa as quick_analysis.py
+    participant mc as model_chain.py<br/>(不动)
+    participant ins as insights.py
+    participant fa as figure_analysis.py
+    participant po as PaperExporter<br/>(paper_output.py)
+    participant ev as evidence.py<br/>EvidenceRegistry
+    participant fs as runs/quick_analysis/<br/>run 目录
+
+    User->>app: 点击「⬆ 智能一键导入」，拖入 Excel/CSV
+    app->>qa: list_sheets + classify_sheets（多 Sheet 分类）
+    qa-->>app: N 个数据表 / M 个说明表（逐表独立运行）
+    app->>step: step=1 导入 done
+
+    User->>app: 点击「✦ 智能分析」
+    app->>step: step=2 分析 running
+    app->>qa: quick_analyze_file(file, progress_cb, demo)
+    qa->>ev: EvidenceRegistry(run_id, run_dir, demo, data_version, model_version)
+    qa->>qa: data_readiness_issues → critical 拦截
+    alt critical 非空
+        qa-->>app: failed=True + 检查项清单
+        app->>step: step=2 fail（显示失败原因，禁止半成品结论）
+    else 通过
+        qa->>mc: train_chain_full(df, schema, model.joblib)
+        mc-->>qa: bundle（OOF/CV metrics + dataset_hash）
+        qa->>qa: registry.statement("qa.stage1_r2_xxx", template, values=metrics) ① 取值即拼接
+        qa->>ins: build_insight_report(..., registry=registry)
+        ins->>ev: registry.statement("ins.corr_top" / "ins.coverage_n", ...)
+        ins-->>qa: Insight_Report.md + Evidence.xlsx
+        qa->>po: PaperExporter.build_bundle()
+        po->>fa: _analysis_for(..., eid, registry)
+        fa->>ev: registry.register("fig.parity_...")
+        po-->>qa: 图/表/数据/metadata + ZIP 路径
+        qa->>ev: registry.save() → evidence_manifest.json
+        qa->>qa: build_smart_summary(...) → summary.json
+        qa->>fs: 写入 model.joblib / evidence_manifest.json / summary.json / results/
+        qa-->>app: results（run_id, record, package）
+        app->>step: step=2 分析 done → step=3 结论
+    end
+
+    User->>app: 查看智能分析摘要卡（P0-3）
+    app->>qa: load_smart_summary(run_id)
+    qa->>fs: 读 summary.json + evidence_manifest.json
+    qa-->>app: SmartSummary dict
+    app->>app: render_smart_summary：顶部状态 / Stage R² 表 / Top FI 图(plot_style) / 结论区 / 行动区
+    app->>ev: badge_row(sentence, item) —— 证据徽标
+    ev-->>User: [n=45 ｜ R²=0.874 ｜ Run_QA_xxx] 点击展开：数值表+计算方式+来源文件
+    User->>app: 下载结果包 ZIP（含 evidence_manifest.json）
+
+    Note over app,fs: 隔离铁律：全程只写 runs/quick_analysis/，不覆盖 models/<br/>「设为正式模型」仍须用户在运行历史中主动确认（promote_to_formal）
