@@ -21,9 +21,11 @@ import pandas as pd
 from .config import ROOT
 from .modes import MODES, load_schema_for_mode, suggest_cv
 from .literature import build_runtime_schema, MELTING_ALIAS_SUGGESTIONS
+from .evidence import EvidenceRegistry
 
 QUICK_ROOT = ROOT / "runs" / "quick_analysis"
 HISTORY_FILE = QUICK_ROOT / "run_history.json"
+SUMMARY_NAME = "summary.json"
 
 META_SHEET_KEYWORDS = ["readme", "source_metadata", "platform_field_mapping",
                        "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata"]
@@ -270,6 +272,11 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     results_dir = run_dir / "results"
     steps = []  # (名称, 状态, 原因)  状态: done/skip/fail
 
+    # V1.6（P0-2）：证据注册表随 run 创建，沿调用链传递（生成即注册，非事后包装）
+    registry = EvidenceRegistry(run_id, run_dir, demo=demo)
+    manifest_path = None
+    summary_path = None
+
     def step(name, fn, skippable=False, skip_reason=None):
         if skippable and skip_reason:
             steps.append((name, "skip", skip_reason))
@@ -325,6 +332,10 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         p = run_dir / "model.joblib"
         b = train_chain_full(df, schema, p, n_splits=None)
         bundle.update(b)
+        # V1.6：训练成功后回填证据注册表的版本信息（meta 类溯源字段）
+        registry.model_version = b.get("model_version")
+        registry.data_version = ("auto_" + str(b.get("dataset_hash"))[:8]) \
+            if b.get("dataset_hash") else None
         return b
     step("模型训练（保存于 runs/quick_analysis，不影响正式模型）", _train)
     if not bundle:
@@ -374,8 +385,10 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         ctx = build_context(mode_id, "文献数据（快速分析）", df=df, bundle=bundle,
                             active_run_id=run_id)
         ctx["_demo"] = demo
+        # V1.6（P0-2）：registry 传入洞察引擎——结论句取值即拼接 + 缺证降级
         md, xlsx = insight_mod.build_insight_report(ctx, df, schema, bundle,
-                                                    results_dir / "insights")
+                                                    results_dir / "insights",
+                                                    registry=registry)
         return {"report": str(md), "evidence": str(xlsx)}
     insight_out = step("数据洞察", _insights)
 
@@ -389,13 +402,34 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
                 "analysis_dir": str(run_d / "analysis")}
     pkg = step("科研图表与结果输出", _package)
 
+    # V1.6（P0-2/P0-3）：成功路径落盘 summary.json + evidence_manifest.json（摘要卡数据源）
+    # 注意顺序：先 build_smart_summary（注册 qa.* 证据），再 registry.save 落盘，
+    # 保证摘要卡每条结论都能在 manifest 中溯源（P0-3 验收 2）。
+    if bundle:
+        try:
+            smart = build_smart_summary(
+                bundle, schema, {"explain": explain, "pareto": pareto_result},
+                demo=demo, run_id=run_id, registry=registry, df=df, mode_id=mode_id)
+            summary_path = run_dir / SUMMARY_NAME
+            summary_path.write_text(json.dumps(smart, ensure_ascii=False, indent=1,
+                                               default=str), encoding="utf-8")
+        except Exception as e:
+            steps.append(("智能摘要生成", "fail", str(e)))
+            summary_path = None
+        try:
+            manifest_path = registry.save(run_dir)
+        except Exception as e:
+            steps.append(("证据清单落盘", "fail", str(e)))
+            manifest_path = None
+
     return _finish(run_id, mode_id, steps, bundle, schema,
                    {"explain": explain, "insight": insight_out, "package": pkg,
                     "pareto": pareto_result, "warnings": (check or {}).get("warning", [])},
-                   sheet_name, demo)
+                   sheet_name, demo, manifest_path=manifest_path, summary_path=summary_path)
 
 
-def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo, failed=False):
+def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo,
+            failed=False, manifest_path=None, summary_path=None):
     record = {
         "run_id": run_id,
         "date": datetime.now().isoformat(timespec="seconds"),
@@ -408,6 +442,9 @@ def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo, fa
         "validation_method": ((bundle or {}).get("chain_cv") or {}).get("method"),
         "stage15": bool((bundle or {}).get("stage15_enabled")),
         "result_path": str(QUICK_ROOT / run_id),
+        # V1.6（P0-2/P0-3）：增量字段——旧字段一律不动，向后兼容
+        "evidence_manifest": str(manifest_path) if manifest_path else None,
+        "summary": str(summary_path) if summary_path else None,
         "failed": failed,
     }
     if not failed:
@@ -415,6 +452,190 @@ def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo, fa
     summary = {"run_id": run_id, "mode": mode_id, "steps": steps, "record": record,
                "bundle": bundle, "schema": schema, **extras}
     return summary
+
+
+# ---------------- V1.6 智能分析摘要卡（P0-3） ----------------
+def _slug(name):
+    """证据 ID 语义 slug：小写 + 去除非字母数字（§7.2 禁止中文与空格）。"""
+    return "".join(ch for ch in str(name) if ch.isalnum()).lower()
+
+
+_STAGE_LABEL_SMART = {"stage1": "一级模型", "stage15": "Stage 1.5",
+                      "stage2": "二级模型", "stage3": "三级模型"}
+
+
+def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
+                        registry=None, df=None, mode_id=None):
+    """构建智能分析摘要卡数据（P0-3），结论句由 registry.statement 取值拼接（P0-2）。
+
+    返回 dict（写入 runs/quick_analysis/<run_id>/summary.json）：
+    header（Run 元信息）/ stages（各 Stage 目标 R²/RMSE/n）/ top_features /
+    pareto / coverage / conclusions（3–6 条证据化结论）。
+    registry=None 时结论区为空（旧调用路径兼容，不报错）。
+    """
+    extras = extras or {}
+    bundle = bundle or {}
+    mode_id = mode_id or "literature"
+    mode_label = MODES.get(mode_id, {}).get("label", mode_id)
+    cv = bundle.get("chain_cv") or {}
+    metrics = cv.get("metrics") or {}
+    oof = cv.get("oof_predictions") or {}
+    cv_method = cv.get("method")
+    data_version = ("auto_" + str(bundle.get("dataset_hash"))[:8]) \
+        if bundle.get("dataset_hash") else None
+    model_version = bundle.get("model_version")
+    n = int(len(df)) if df is not None else None
+    batches = int(df["batch_id"].nunique()) if (df is not None and "batch_id" in df.columns) else None
+
+    # 各 Stage 目标指标（真实计算值；n 取 OOF 有效样本数）
+    def _oof_n(oof_all, stage, t):
+        """OOF 有效样本数；oof 各 stage 可能为 DataFrame（列为目标）或 dict（值为 Series）。"""
+        so = oof_all.get(stage) if hasattr(oof_all, "get") else None
+        if so is None:
+            return None
+        try:
+            if hasattr(so, "columns") and t in so.columns:      # DataFrame
+                return int(so[t].dropna().shape[0])
+            if hasattr(so, "get"):                              # dict of Series
+                s = so.get(t)
+                return int(s.dropna().shape[0]) if s is not None else None
+        except Exception:
+            return None
+        return None
+
+    stages = {}
+    for stage in ["stage1", "stage15", "stage2", "stage3"]:
+        rows = []
+        for t, met in (metrics.get(stage) or {}).items():
+            n_oof = _oof_n(oof, stage, t)
+            row = {"target": t, "n": n_oof}
+            if "R2" in met:
+                row.update({"R2": float(met["R2"]), "RMSE": float(met["RMSE"]),
+                            "MAE": float(met["MAE"])})
+            else:
+                row.update({"Accuracy": met.get("Accuracy"),
+                            "Balanced_Accuracy": met.get("Balanced_Accuracy"),
+                            "F1_macro": met.get("F1_macro")})
+            rows.append(row)
+        if rows:
+            stages[stage] = rows
+
+    # Top 5 特征重要性（一级模型首个目标）
+    top_features = []
+    try:
+        t0 = list(bundle["stage1_models"].keys())[0]
+        pipe = bundle["stage1_models"][t0]
+        imp = pd.Series(pipe.named_steps["model"].feature_importances_,
+                        index=bundle.get("stage1_features") or []).sort_values(ascending=False).head(5)
+        top_features = [{"feature": str(f), "importance": float(v)} for f, v in imp.items()]
+    except Exception:
+        top_features = []
+
+    pareto_stats = {}
+    pareto = extras.get("pareto") or {}
+    if isinstance(pareto, dict) and pareto.get("stats"):
+        pareto_stats = pareto["stats"]
+
+    coverage = None
+    if df is not None:
+        try:
+            from .insights import coverage_text
+            coverage = coverage_text(df, schema)
+        except Exception:
+            coverage = None
+
+    # 结论区（3–6 条，全部 registry.statement 产出；required 缺失自动降级）
+    conclusions = []
+    if registry is not None:
+        if n is not None:
+            txt = registry.statement(
+                "qa.n_samples",
+                "本次分析共读取 {n} 条记录、{batches} 个独立喷涂批次（数据版本 {data_version}）。",
+                source_class="direct", computed_by="quick_analysis.run_quick_analysis",
+                values={"n": n, "batches": batches if batches is not None else 0,
+                        "data_version": data_version or "未知"},
+                required=("n", "batches"))
+            conclusions.append({"eid": "qa.n_samples", "text": txt,
+                                "source_class": "direct"})
+        for stage in ["stage1", "stage2", "stage3"]:
+            rows = stages.get(stage) or []
+            if not rows or "R2" not in rows[0]:
+                continue
+            r0 = rows[0]
+            eid = f"qa.{stage}_r2_{_slug(r0['target'])}"
+            txt = registry.statement(
+                eid,
+                "在当前模型中，{stage_label}目标 {target} 的交叉验证 R²={r2:.3f}、"
+                "RMSE={rmse:.3g}（n={n}，CV: {cv_method}，折外预测非训练集拟合值）。",
+                source_class="model", computed_by="model_chain.train_chain_full",
+                values={"stage_label": _STAGE_LABEL_SMART.get(stage, stage),
+                        "target": r0["target"], "r2": r0["R2"], "rmse": r0["RMSE"],
+                        "n": r0["n"] if r0["n"] is not None else n or 0,
+                        "cv_method": cv_method or "未记录"},
+                required=("r2", "rmse", "n", "cv_method"))
+            conclusions.append({"eid": eid, "text": txt, "source_class": "model"})
+        if top_features:
+            t0_name = ""
+            try:
+                t0_name = list(bundle["stage1_models"].keys())[0]
+            except Exception:
+                t0_name = "一级模型首目标"
+            f0 = top_features[0]
+            txt = registry.statement(
+                "qa.top_feature",
+                "在当前模型中（CV: {cv_method}），对 {target} 影响最大的变量为 "
+                "{feature}（重要性 {imp:.3f}）。",
+                source_class="model", computed_by="insights.model_key_factors",
+                values={"cv_method": cv_method or "未记录", "target": t0_name,
+                        "feature": f0["feature"], "imp": f0["importance"]},
+                required=("feature", "imp", "cv_method"))
+            conclusions.append({"eid": "qa.top_feature", "text": txt,
+                                "source_class": "model"})
+        if pareto_stats.get("n_pareto"):
+            txt = registry.statement(
+                "qa.pareto_count",
+                "在当前模型与约束下（CV: {cv_method}），共搜索到 {n_pareto} 个 Pareto "
+                "非支配方案（候选 {n_candidates}，满足约束 {n_feasible}）。",
+                source_class="model", computed_by="optimize.random_pareto_search",
+                values={"cv_method": cv_method or "未记录",
+                        "n_pareto": int(pareto_stats["n_pareto"]),
+                        "n_candidates": int(pareto_stats.get("n_candidates", 0)),
+                        "n_feasible": int(pareto_stats.get("n_feasible", 0))},
+                required=("n_pareto", "cv_method"))
+            conclusions.append({"eid": "qa.pareto_count", "text": txt,
+                                "source_class": "model"})
+        conclusions = conclusions[:6]  # 摘要卡结论区 3–6 条
+
+    return {
+        "run_id": run_id,
+        "mode": mode_id,
+        "mode_label": mode_label,
+        "demo": bool(demo),
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "header": {"n": n, "batches": batches, "data_version": data_version,
+                   "model_version": model_version, "cv_method": cv_method,
+                   "stage15": bool(bundle.get("stage15_enabled"))},
+        "stages": stages,
+        "top_features": top_features,
+        "pareto": ({"n_pareto": int(pareto_stats.get("n_pareto", 0)),
+                    "n_candidates": int(pareto_stats.get("n_candidates", 0)),
+                    "n_feasible": int(pareto_stats.get("n_feasible", 0))}
+                   if pareto_stats else None),
+        "coverage": coverage,
+        "conclusions": conclusions,
+        "failed": False,
+    }
+
+
+def load_smart_summary(run_id):
+    """读取 runs/quick_analysis/<run_id>/summary.json；不存在/损坏 → None。"""
+    p = QUICK_ROOT / str(run_id) / SUMMARY_NAME
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=False):

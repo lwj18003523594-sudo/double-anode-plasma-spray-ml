@@ -336,46 +336,131 @@ def recommendation_basis(ev_row, front_row=None, objectives=None):
     return "\n\n".join(lines)
 
 
-def build_insight_report(ctx, df, schema, bundle, out_dir):
-    """生成 Insight_Report.md + Insight_Evidence.xlsx（I 模块）。"""
+def build_insight_report(ctx, df, schema, bundle, out_dir, registry=None):
+    """生成 Insight_Report.md + Insight_Evidence.xlsx（I 模块）。
+
+    V1.6（P0-2）：可选 registry（EvidenceRegistry）——传入时各 section 结论句改为
+    registry.statement() 取值即拼接生成（缺证自动降级），并在报告末尾追加
+    「附：证据溯源」附录；registry=None 时行为与 V1.5 完全一致（向后兼容）。
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sections = []
+    ev_ids = []  # (eid, text) 追溯附录用
+    _rows_filter = "data_origin ∈ {experimental, literature, cfd}"
+    _files = ["Insight_Evidence.xlsx"]
+
+    def _say(eid, template, *, source_class, computed_by, values, required=()):
+        """registry 态：statement 生成（登记 ev_ids）；旧态：直接 format（缺证返回原 V1.5 文案由调用方处理）。"""
+        if registry is not None:
+            txt = registry.statement(eid, template, source_class=source_class,
+                                     computed_by=computed_by, values=values,
+                                     required=required, rows_filter=_rows_filter,
+                                     files=_files)
+            ev_ids.append((eid, txt))
+            return txt
+        return template.format(**values)
+
     cov = coverage_stats(df, schema)
-    sections.append(("数据覆盖", coverage_text(df, schema)
-                     + f"\n\n- 数据记录数 {cov['n_fact']}（事实统计仅含 experimental/literature/CFD 行）"
-                     + (f"；重复测量试样 {cov['repeat_samples']} 个" if cov['repeat_samples'] else "")))
+    if registry is not None:
+        cov_txt = _say(
+            "ins.coverage_n",
+            "数据显示当前事实统计样本 n={n} 条（仅 experimental/literature/CFD 行），"
+            "覆盖输入变量 {n_vars} 个，重复测量试样 {repeat} 个。",
+            source_class="direct", computed_by="insights.coverage_stats",
+            values={"n": cov["n_fact"],
+                    "n_vars": int(len(cov["coverage"])),
+                    "repeat": int(cov["repeat_samples"] or 0)},
+            required=("n", "n_vars"))
+        sections.append(("数据覆盖", cov_txt))
+    else:
+        sections.append(("数据覆盖", coverage_text(df, schema)
+                         + f"\n\n- 数据记录数 {cov['n_fact']}（事实统计仅含 experimental/literature/CFD 行）"
+                         + (f"；重复测量试样 {cov['repeat_samples']} 个" if cov['repeat_samples'] else "")))
     corr = correlation_report(df, schema)
     if len(corr):
-        top_txt = "；".join(f"{r['输入']}×{r['输出']}(Pearson {r['Pearson']:+.2f}, n={r['n']})"
-                            for _, r in corr.head(6).iterrows())
-        sections.append(("变量相关性（直接观测）",
-                         "[直接数据] 数据显示以下输入—输出对存在相关趋势（未做显著性检验，"
-                         "不构成因果关系）：" + top_txt))
+        r0 = corr.iloc[0]
+        if registry is not None:
+            top_txt = _say(
+                "ins.corr_top",
+                "数据显示 {x} 与 {y} 之间存在相关趋势（Pearson {pearson:+.3f}，n={n}；"
+                "未做显著性检验，不构成因果结论）；其余相关对详见证据表。",
+                source_class="direct", computed_by="insights.correlation_report",
+                values={"x": str(r0["输入"]), "y": str(r0["输出"]),
+                        "pearson": float(r0["Pearson"]), "n": int(r0["n"])},
+                required=("pearson", "n"))
+        else:
+            top_txt = "；".join(f"{r['输入']}×{r['输出']}(Pearson {r['Pearson']:+.2f}, n={r['n']})"
+                                for _, r in corr.head(6).iterrows())
+            top_txt = ("[直接数据] 数据显示以下输入—输出对存在相关趋势（未做显著性检验，"
+                       "不构成因果关系）：" + top_txt)
+        sections.append(("变量相关性（直接观测）", top_txt))
     else:
-        sections.append(("变量相关性（直接观测）", "当前数据量不足以计算稳定的相关趋势。"))
+        if registry is not None:
+            sections.append(("变量相关性（直接观测）",
+                             _say("ins.corr_top", "当前数据量不足以计算稳定的相关趋势。",
+                                  source_class="direct",
+                                  computed_by="insights.correlation_report",
+                                  values={}, required=("pearson", "n"))))
+        else:
+            sections.append(("变量相关性（直接观测）", "当前数据量不足以计算稳定的相关趋势。"))
     factors, stability = model_key_factors(bundle)
     if factors:
         k0 = list(factors.keys())[0]
         tf = "、".join(factors[k0].head(5).index.tolist())
-        s_txt = ""
-        if stability:
-            s_txt = " 跨折稳定性：" + "；".join(f"{k}（{v}）" for k, v in list(stability.items())[:3])
-        sections.append(("模型规律（模型推断）",
-                         f"[模型推断] 在当前模型中（{k0}），较稳定的重要变量包括：{tf}。{s_txt}"
-                         " 模型重要性仅表征统计关联。"))
+        if registry is not None:
+            cvm = ((bundle or {}).get("chain_cv") or {}).get("method") or "未记录"
+            m_txt = _say(
+                "ins.model_key",
+                "在当前模型中（{model_key}，CV: {cv_method}），重要性较高的输入变量包括：{top_feats}。"
+                "模型重要性仅表征统计关联。",
+                source_class="model", computed_by="insights.model_key_factors",
+                values={"model_key": k0, "cv_method": cvm, "top_feats": tf},
+                required=("top_feats", "cv_method"))
+        else:
+            s_txt = ""
+            if stability:
+                s_txt = " 跨折稳定性：" + "；".join(f"{k}（{v}）" for k, v in list(stability.items())[:3])
+            m_txt = (f"[模型推断] 在当前模型中（{k0}），较稳定的重要变量包括：{tf}。{s_txt}"
+                     " 模型重要性仅表征统计关联。")
+        sections.append(("模型规律（模型推断）", m_txt))
     else:
-        sections.append(("模型规律（模型推断）", "当前无可用模型解释结果。"))
+        if registry is not None:
+            sections.append(("模型规律（模型推断）",
+                             _say("ins.model_key", "当前无可用模型解释结果。",
+                                  source_class="model",
+                                  computed_by="insights.model_key_factors",
+                                  values={}, required=("top_feats", "cv_method"))))
+        else:
+            sections.append(("模型规律（模型推断）", "当前无可用模型解释结果。"))
     anom = anomaly_review(df, bundle)
     if len(anom):
-        a_txt = "；".join(f"{r['对象']}（{r['详情']}）" for _, r in anom.head(4).iterrows())
-        sections.append(("值得复核的数据（直接观测 + 模型推断）",
-                         "[需进一步验证] " + a_txt + "。以上仅为复核建议，不自动删除任何数据。"))
+        if registry is not None:
+            a_items = "；".join(f"{r['对象']}（{r['详情']}）" for _, r in anom.head(4).iterrows())
+            a_txt = _say(
+                "ins.anomaly_review",
+                "数据显示以下记录值得复核：{items}。以上仅为复核建议，不自动删除任何数据。",
+                source_class="direct", computed_by="insights.anomaly_review",
+                values={"items": a_items, "n_anomaly": int(len(anom))},
+                required=("items",))
+        else:
+            a_txt = "；".join(f"{r['对象']}（{r['详情']}）" for _, r in anom.head(4).iterrows())
+            a_txt = "[需进一步验证] " + a_txt + "。以上仅为复核建议，不自动删除任何数据。"
+        sections.append(("值得复核的数据（直接观测 + 模型推断）", a_txt))
     gaps = data_gap_suggestions(df, schema, bundle)
     if len(gaps):
-        g_txt = "；".join(f"{r['区域']}" for _, r in gaps.head(5).iterrows())
-        sections.append(("建议补充实验区域（优化建议）",
-                         "[优化建议] " + g_txt + "。仅为数据采集建议，最终实验方案由研究者确定。"))
+        if registry is not None:
+            g_areas = "；".join(str(r["区域"]) for _, r in gaps.head(5).iterrows())
+            g_txt = _say(
+                "ins.data_gap",
+                "当前数据存在稀疏或边界区域：{areas}。仅为数据采集建议，最终实验方案由研究者确定。",
+                source_class="direct", computed_by="insights.data_gap_suggestions",
+                values={"areas": g_areas, "n_gap": int(len(gaps))},
+                required=("areas",))
+        else:
+            g_txt = "；".join(f"{r['区域']}" for _, r in gaps.head(5).iterrows())
+            g_txt = "[优化建议] " + g_txt + "。仅为数据采集建议，最终实验方案由研究者确定。"
+        sections.append(("建议补充实验区域（优化建议）", g_txt))
     if ctx:
         sections.append(("熔融状态", f"Stage 1.5：{'已启用（数据具有熔融标签）' if ctx.get('stage15_enabled') else '未启用（缺少熔融标签，主链正常）'}"))
     demo = ctx.get("_demo") if ctx else False
@@ -385,6 +470,13 @@ def build_insight_report(ctx, df, schema, bundle, out_dir):
           "> 本报告为科研辅助分析，不得自动当作正式论文结论。", ""]
     for title, content in sections:
         md += [f"## {title}", "", content, ""]
+    if registry is not None and ev_ids:
+        md += ["## 附：证据溯源（Evidence Manifest）", "",
+               "> 以下结论均已注册为证据，逐条可在 evidence_manifest.json 中核对数值、"
+               "计算方式与数据版本。", ""]
+        for eid, txt in ev_ids:
+            md.append(f"- `{eid}`：{txt}")
+        md.append("")
     md_path = out_dir / "Insight_Report.md"
     md_path.write_text("\n".join(md), encoding="utf-8")
 

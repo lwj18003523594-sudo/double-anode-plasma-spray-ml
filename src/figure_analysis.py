@@ -77,11 +77,16 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
                    trend_desc=None, class_counts=None, demo=False,
                    sample_warning=None, extrapolation=False, melting_from_model=False,
                    has_microstructure=False, literature_refs=None, model_type="XGBoost",
-                   cv_method=None, extra_notes=None):
+                   cv_method=None, extra_notes=None,
+                   eid=None, registry=None):
     """生成 8 段式科研解读（纯文本模板 + 调用方传入的真实统计量）。
 
     所有数值必须由调用方从真实数据/模型计算后传入；本函数绝不编造数字。
     literature_refs: [(title_or_source, year_or_doi)]，仅当 Source_Metadata 提供时非空。
+
+    V1.6（P0-2）：可选 eid + registry——传入 EvidenceRegistry 时，本解读引用的
+    统计量注册为一条证据（fig.* 前缀），md 末尾追加「附：证据溯源」段；
+    registry=None 时行为与 V1.5 完全一致（向后兼容）。
     """
     zh_t = target or "该目标"
     sections = []
@@ -215,6 +220,38 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
         body.append("")
     body.append(f"## 附：来源与引用")
     body.append(lit_section)
+
+    # V1.6（P0-2）：证据溯源段——本解读引用的统计量注册进 EvidenceRegistry，
+    # md 末尾追加「附：证据溯源」（registry=None 时跳过，行为与 V1.5 一致）。
+    if registry is not None and eid:
+        ev_values = {}
+        for k, v in [("n", n), ("batch_count", batch_count), ("r2", r2), ("rmse", rmse),
+                     ("mae", mae), ("pearson", pearson), ("spearman", spearman),
+                     ("pareto_count", pareto_count), ("cv_method", cv_method)]:
+            if v is not None:
+                ev_values[k] = v
+        _pieces = []
+        for k, v in ev_values.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                _pieces.append(f"{k}={{{k}:.4g}}")
+            else:
+                _pieces.append(f"{k}={{{k}}}")
+        _template = "本图解读引用的统计量：" + "，".join(_pieces) + "。"
+        _model_kinds = ("parity", "residual", "importance", "shap", "pdp",
+                        "pareto", "melting_perf")
+        _is_model = (kind in _model_kinds or r2 is not None
+                     or bool(top_features) or pareto_count is not None)
+        stmt = registry.statement(
+            eid, _template, source_class="model" if _is_model else "direct",
+            computed_by="figure_analysis.analyze_figure", values=ev_values,
+            required=tuple(k for k in ("n",) if k in ev_values),
+            rows_filter="全部事实行（experimental/literature/CFD）")
+        body.append("")
+        body.append("## 附：证据溯源")
+        body.append(f"- 证据 ID：`{eid}`（已写入 evidence_manifest.json，可逐项核对）")
+        body.append(f"- {stmt}")
+        body.append("- 计算方式：figure_analysis.analyze_figure（数值由绘图调用方传入，本函数不计算）")
+
     if extra_notes:
         body.append("")
         body.extend(extra_notes)
