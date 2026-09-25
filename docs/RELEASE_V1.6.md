@@ -33,7 +33,7 @@ V1.6 不新增研究功能，聚焦三件事：**好用**（首页智能操作�
 - `run_quick_analysis` 内部创建 `EvidenceRegistry` 并沿调用链传入
   `insights.build_insight_report` / `figure_analysis.analyze_figure`；
 - 每个 run 落盘 `evidence_manifest.json`（10 条证据：ins.* 5 条 + qa.* 5 条）与
-  `summary.json`，**均随结果 ZIP 打包**（ZIP 根可见）；
+  `summary.json`，**均随结果 ZIP 打包**（位于 ZIP 内 `results/` 目录）；
 - 洞察报告与图表解读末尾自动追加「附：证据溯源」附录；
 - history record 增量字段 `evidence_manifest` / `summary`（旧字段不动，向后兼容）。
 

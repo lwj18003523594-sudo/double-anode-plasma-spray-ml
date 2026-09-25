@@ -1566,18 +1566,35 @@ class PaperExporter:
         self.write_reproducibility_manifest()
         self.write_captions()
 
-        # V1.6（P0-2 验收 6）：evidence_manifest.json 透传进 ZIP 根——
-        # quick run 场景 manifest 位于 run_dir 上一级（runs/quick_analysis/<run_id>/），
-        # 复制到本输出目录根后随 _zip_results 一并打包。
+        # V1.6（P0-2 验收 6）：evidence_manifest.json + summary.json 透传进 ZIP——
+        # quick run 场景两文件位于 run_dir 上一级（runs/quick_analysis/<run_id>/），
+        # 复制到本输出目录（ZIP 内 results/ 子目录）后随 _zip_results 一并打包。
+        # V1.6 fix（QA 回归问题 1 补充）：registry 传入时，此时 fig.* 证据已在
+        # 上方图表/解读生成过程中注册——直接落盘完整 manifest，避免复制早于
+        # _package 保存的旧版本（缺 fig.* 条目）。
         try:
-            _mf_local = self.run_dir / "evidence_manifest.json"
-            if not _mf_local.exists():
-                _mf_src = self.run_dir.parent / "evidence_manifest.json"
-                if _mf_src.exists():
-                    shutil.copy2(_mf_src, _mf_local)
-                    paths.setdefault("metadata", []).append(_mf_local)
+            if self.registry is not None and len(self.registry) > 0:
+                _mf_local = self.registry.save(self.run_dir)
+                paths.setdefault("metadata", []).append(_mf_local)
+            else:
+                _mf_local = self.run_dir / "evidence_manifest.json"
+                if not _mf_local.exists():
+                    _mf_src = self.run_dir.parent / "evidence_manifest.json"
+                    if _mf_src.exists():
+                        shutil.copy2(_mf_src, _mf_local)
+                        paths.setdefault("metadata", []).append(_mf_local)
         except Exception as e:
             log_event("paper_export_manifest_error", f"{e}")
+        # V1.6 fix（QA 回归问题 2）：summary.json（智能摘要卡数据源）同法打包
+        try:
+            _sm_local = self.run_dir / "summary.json"
+            if not _sm_local.exists():
+                _sm_src = self.run_dir.parent / "summary.json"
+                if _sm_src.exists():
+                    shutil.copy2(_sm_src, _sm_local)
+                    paths.setdefault("metadata", []).append(_sm_local)
+        except Exception as e:
+            log_event("paper_export_summary_error", f"{e}")
 
         top_features = []
         try:

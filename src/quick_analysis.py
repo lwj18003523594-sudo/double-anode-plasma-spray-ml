@@ -419,13 +419,26 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
 
     def _package():
         prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
+        # V1.6 fix（QA 回归问题 1）：registry 传入 PaperExporter——
+        # 否则 build_bundle 模块 I 会以 registry=None 重新生成洞察报告，
+        # 覆盖 _insights() 的证据化版本，且 fig.* 证据不注册。
         ex = PaperExporter(df, schema, bundle, lang="zh", formats=("png",),
-                           demo=demo, prefix=prefix, run_dir=results_dir)
+                           demo=demo, prefix=prefix, run_dir=results_dir,
+                           registry=registry)
         run_d, zip_p, paths = ex.build_bundle(n_candidates=800)
         return {"run_dir": str(run_d), "zip": str(zip_p),
                 "figures": len(paths.get("figures", [])),
                 "analysis_dir": str(run_d / "analysis")}
     pkg = step("科研图表与结果输出", _package)
+
+    # V1.6 fix（QA 回归问题 1 补充）：_package 期间 PaperExporter 会注册 fig.* 证据，
+    # 此处再次落盘 run_dir 根的 manifest，使 fig.* 条目进入摘要卡数据源文件
+    # （ZIP 内的完整 manifest 已由 PaperExporter 在 build_bundle 末尾落盘）。
+    if bundle and manifest_path is not None:
+        try:
+            manifest_path = registry.save(run_dir)
+        except Exception as e:
+            steps.append(("证据清单更新", "fail", str(e)))
 
     return _finish(run_id, mode_id, steps, bundle, schema,
                    {"explain": explain, "insight": insight_out, "package": pkg,
