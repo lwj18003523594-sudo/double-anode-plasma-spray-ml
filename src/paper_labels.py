@@ -93,6 +93,18 @@ MISC_LABELS = {
     "pareto_front": {"zh": "Pareto 非支配解", "en": "Pareto non-dominated solutions"},
     "candidates": {"zh": "候选工艺点", "en": "Candidate solutions"},
     "demo_mark": {"zh": "DEMO 数据", "en": "DEMO DATA"},
+    # ---- V1.6：统计诚信注脚 / 版式相关英文标签（P0-5 验收 2） ----
+    "identity_line": {"zh": "y = x 参考线", "en": "y = x reference line"},
+    "zero_line": {"zh": "零参考线", "en": "Zero reference line"},
+    "stat_note_prefix": {"zh": "统计标注", "en": "Statistical annotation"},
+    "cv_note": {"zh": "评价方式：全链分组交叉验证（折外预测，非训练集拟合值）",
+                "en": "Evaluation: full-chain grouped CV (out-of-fold predictions)"},
+    "errbar_note": {"zh": "误差棒为预测标准差（部署模型）",
+                    "en": "Error bars: prediction std (deployment model)"},
+    "single_col": {"zh": "单栏图（89 mm）", "en": "Single column (89 mm)"},
+    "double_col": {"zh": "双栏图（183 mm）", "en": "Double column (183 mm)"},
+    "evidence_note": {"zh": "附：证据溯源", "en": "Appendix: Evidence traceability"},
+    "sample_count": {"zh": "样本数", "en": "Sample count"},
 }
 
 

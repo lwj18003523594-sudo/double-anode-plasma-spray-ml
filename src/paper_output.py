@@ -29,7 +29,12 @@ from .model_chain import predict_chain, _XGB_HYPERPARAMS
 from .optimize import random_pareto_search
 from .paper_labels import (paper_label, axis_label, stage_paper_label,
                            misc_label, target_slug)
-from .paper_style import apply_paper_style, save_figure
+from .paper_style import (apply_paper_style, save_figure,
+                          fig_single, fig_double, fig_mid, add_stat_box)
+# V1.6（P0-5）：论文图与网页端同源色板——hex 只定义于 src/plot_style.py
+from .plot_style import (GRAY_INK, GRAY_MUTED, GRAY_REF, GRAY_BORDER, GRAY_PAPER,
+                         BLUE_SIGNAL, BLUE_MID, BLUE_LIGHT, PINK_ACCENT, PINK_MID,
+                         QUAL_CYCLE)
 from .research_utils import (pareto_row_support, support_label, log_event)
 from .modes import MELTING_CLASS_ZH
 
@@ -74,7 +79,8 @@ class PaperExporter:
     """一次输出会话：绑定 数据/模型/语言/格式，写入独立运行目录。"""
 
     def __init__(self, df, schema, bundle, lang="zh", formats=("png", "svg"),
-                 demo=False, run_dir=None, run_prefix="Run", prefix=None):
+                 demo=False, run_dir=None, run_prefix="Run", prefix=None,
+                 registry=None):
         self.df = df
         self.schema = schema
         self.bundle = bundle
@@ -82,6 +88,9 @@ class PaperExporter:
         self.formats = ("png_svg" if f == "png_svg" else f for f in formats)
         self.formats = tuple(self.formats)
         self.demo = demo
+        # V1.6（P0-2）：可选证据注册表——传入时八段式解读注册 fig.* 证据；
+        # 默认 None，旧调用路径零修改向后兼容。
+        self.registry = registry
         ensure_output_tree()
         if run_dir is None:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -155,11 +164,17 @@ class PaperExporter:
             log_event("analysis_save_error", f"{stem_base}: {e}")
             return None
 
-    def _analysis_for(self, kind, stem_base, **kw):
-        """生成并保存 8 段式科研解读（证据约束模板，见 figure_analysis）。"""
+    def _analysis_for(self, kind, stem_base, eid=None, **kw):
+        """生成并保存 8 段式科研解读（证据约束模板，见 figure_analysis）。
+
+        V1.6：可选 eid——self.registry 存在时注册 fig.* 证据并追加证据溯源段。
+        """
         try:
             from .figure_analysis import analyze_figure
             kw.setdefault("demo", self.demo)
+            if self.registry is not None and eid:
+                kw["eid"] = eid
+                kw["registry"] = self.registry
             md = analyze_figure(kind, **kw)
             return self._save_analysis(stem_base, md)
         except Exception as e:
@@ -258,7 +273,7 @@ class PaperExporter:
                     f"and constraints; no single optimum implied; data: {dtype_en}.")
         if kind == "ranges":
             return (f"图为当前模型与约束条件下 Pareto 解的工艺参数范围（归一化至配置允许范围），"
-                    f"并非绝对最佳工艺窗口。数据类型：{dtype}。"
+                    f"不代表普适的工艺区间结论。数据类型：{dtype}。"
                     if lang == "zh" else
                     "Pareto solution parameter ranges under the current model and constraints "
                     "(normalized to configured bounds); not an absolute optimum; data: " + dtype_en + ".")
@@ -455,10 +470,10 @@ class PaperExporter:
         comp = {c: float(pd.to_numeric(self.df[c], errors="coerce").notna().mean() * 100)
                 for c in cols}
         items = sorted(comp.items(), key=lambda kv: kv[1])
-        fig, ax = plt.subplots(figsize=(7.2, max(3.0, 0.32 * len(items) + 1.0)))
+        fig, ax = plt.subplots(figsize=fig_mid(max(3.0, 0.32 * len(items) + 1.0)))
         names = [paper_label(c, self.lang) for c, _ in items]
         vals = [v for _, v in items]
-        ax.barh(names, vals, color="#4c72b0", alpha=0.85)
+        ax.barh(names, vals, color=BLUE_SIGNAL, alpha=0.85)
         ax.set_xlabel(f"{axis_label('completeness', self.lang)} (%)")
         ax.set_xlim(0, 105)
         for i, v in enumerate(vals):
@@ -477,12 +492,12 @@ class PaperExporter:
         n = len(cols)
         ncol = 3
         nrow = int(np.ceil(n / ncol))
-        fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 2.4 * nrow))
+        fig, axes = plt.subplots(nrow, ncol, figsize=fig_double(2.4 * nrow))
         axes = np.atleast_1d(axes).ravel()
         for i, c in enumerate(cols):
             ax = axes[i]
             vals = pd.to_numeric(self.df[c], errors="coerce").dropna()
-            ax.hist(vals, bins=20, color="#4c72b0", alpha=0.85, edgecolor="white", linewidth=0.4)
+            ax.hist(vals, bins=20, color=BLUE_SIGNAL, alpha=0.85, edgecolor="white", linewidth=0.4)
             ax.set_title(paper_label(c, self.lang), fontsize=10.5)
             ax.tick_params(labelsize=8.5)
         for j in range(n, len(axes)):
@@ -500,8 +515,7 @@ class PaperExporter:
                 if pd.to_numeric(self.df[c], errors="coerce").notna().sum() >= 3]
         X = self.df[cols].apply(pd.to_numeric, errors="coerce")
         corr = X.corr()
-        fig, ax = plt.subplots(figsize=(max(6.0, 0.42 * len(cols) + 2),
-                                        max(5.0, 0.42 * len(cols) + 1.5)))
+        fig, ax = plt.subplots(figsize=fig_double(max(5.0, 0.42 * len(cols) + 1.5)))
         im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1)
         short = [paper_label(c, self.lang, with_unit=False) for c in cols]
         ax.set_xticks(range(len(cols)), short, rotation=90, fontsize=7.5)
@@ -562,23 +576,23 @@ class PaperExporter:
     def fig_parity(self, stage, target):
         actual, pred = self._oof_series(stage, target)
         r2, rmse, mae = self._stats_of(stage, target)
-        fig, ax = plt.subplots(figsize=(4.6, 4.4))
+        # V1.6（P0-5）：Nature 单栏 89mm 版式；1:1 中性灰虚线 + 信号蓝散点 + 统一注脚框
+        fig, ax = plt.subplots(figsize=fig_single(3.6))
         lo = float(min(actual.min(), pred.min()))
         hi = float(max(actual.max(), pred.max()))
         pad = (hi - lo) * 0.06 if hi > lo else 1.0
-        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "--", color="#555555",
+        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "--", color=GRAY_REF,
                 linewidth=1.0, label="y = x", zorder=1)
-        ax.scatter(actual, pred, s=26, c="#4c72b0", alpha=0.75, edgecolors="none", zorder=2)
+        ax.scatter(actual, pred, s=26, c=BLUE_SIGNAL, alpha=0.75, edgecolors="none", zorder=2)
         ax.set_xlim(lo - pad, hi + pad)
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_xlabel(axis_label("actual", self.lang))
         ax.set_ylabel(axis_label("predicted", self.lang))
         ax.set_title(f"{misc_label('title_parity', self.lang)} — {paper_label(target, self.lang)}",
                      fontsize=11.5)
-        stats_txt = f"R² = {r2:.3f}\nRMSE = {rmse:.3g}\nMAE = {mae:.3g}\nn = {len(actual)}"
-        ax.text(0.03, 0.97, stats_txt, transform=ax.transAxes, va="top", ha="left",
-                fontsize=9, bbox=dict(boxstyle="round,pad=0.3", fc="white",
-                                      ec="#bbbbbb", alpha=0.85))
+        cv_txt = self.cv.get("method") or "—"
+        stats_txt = f"R² = {r2:.3f}\nRMSE = {rmse:.3g}\nMAE = {mae:.3g}\nn = {len(actual)}\nCV: {cv_txt}"
+        add_stat_box(ax, stats_txt, loc="upper left")
         fig.tight_layout()
         saved, stem = self._save_fig(fig, f"Fig_B{self._stage_bno(stage)}_{target_slug(target)}_Parity")
         code = f"Data_B{self._stage_bno(stage)}"
@@ -603,7 +617,9 @@ class PaperExporter:
                               data_file=data.name, r2=r2, rmse=rmse, mae=mae,
                               extra={"plot": "parity", "oof_only": True},
                               caption=self._cap("parity", target, self._model_kind(stage, target), n=len(actual)))
-        self._analysis_for("parity", Path(saved[0]).stem, target=target,
+        self._analysis_for("parity", Path(saved[0]).stem,
+                           eid=f"fig.parity_{stage}_{target_slug(target).lower()}",
+                           target=target,
                            n=int(len(actual)), r2=r2, rmse=rmse, mae=mae,
                            model_type=self._model_kind(stage, target),
                            cv_method="分组交叉验证 OOF（折外预测）",
@@ -614,13 +630,17 @@ class PaperExporter:
         actual, pred = self._oof_series(stage, target)
         resid = pred - actual
         r2, rmse, mae = self._stats_of(stage, target)
-        fig, ax = plt.subplots(figsize=(4.8, 3.8))
-        ax.axhline(0, linestyle="--", color="#555555", linewidth=1.0, zorder=1)
-        ax.scatter(pred, resid, s=26, c="#c44e52", alpha=0.75, edgecolors="none", zorder=2)
+        # V1.6：Nature 单栏版式；零线中性灰、残差点强调粉、统一注脚框直接标注
+        fig, ax = plt.subplots(figsize=fig_single(3.2))
+        ax.axhline(0, linestyle="--", color=GRAY_REF, linewidth=1.0, zorder=1)
+        ax.scatter(pred, resid, s=26, c=PINK_ACCENT, alpha=0.75, edgecolors="none", zorder=2)
         ax.set_xlabel(axis_label("predicted", self.lang))
         ax.set_ylabel(axis_label("residual", self.lang))
         ax.set_title(f"{misc_label('title_residual', self.lang)} — {paper_label(target, self.lang)}",
                      fontsize=11.5)
+        cv_txt = self.cv.get("method") or "—"
+        add_stat_box(ax, f"RMSE = {rmse:.3g}\nMAE = {mae:.3g}\nn = {len(actual)}\nCV: {cv_txt}",
+                     loc="upper right")
         fig.tight_layout()
         saved, stem = self._save_fig(fig, f"Fig_B{self._stage_bno(stage)}_{target_slug(target)}_Residual")
         stem_d = f"{self.demo_prefix}Data_B{self._stage_bno(stage)}_{target_slug(target)}_Residual"
@@ -655,12 +675,14 @@ class PaperExporter:
             for t in (self.metrics.get(stage) or {}):
                 rows.append((stage, t, float(self.metrics[stage][t]["R2"])))
         rows.sort(key=lambda r: r[2])
-        fig, ax = plt.subplots(figsize=(6.8, max(3.0, 0.36 * len(rows) + 1.2)))
+        fig, ax = plt.subplots(figsize=fig_mid(max(3.0, 0.36 * len(rows) + 1.2)))
         names = [f"{stage_paper_label(s, self.lang)} · {paper_label(t, self.lang)}" for s, t, _ in rows]
         vals = [v for _, _, v in rows]
-        colors = [{"stage1": "#4c72b0", "stage2": "#55a868", "stage3": "#c44e52"}[s] for s, _, _ in rows]
+        # V1.6：Stage 三色改用统一分类循环色（蓝/灰/粉家族，禁 seaborn 残留色）
+        _stage_color = {"stage1": QUAL_CYCLE[0], "stage2": QUAL_CYCLE[1], "stage3": QUAL_CYCLE[2]}
+        colors = [_stage_color[s] for s, _, _ in rows]
         ax.barh(names, vals, color=colors, alpha=0.88)
-        ax.axvline(0, color="#333333", linewidth=0.8)
+        ax.axvline(0, color=GRAY_REF, linewidth=0.8)
         ax.set_xlabel(axis_label("R2overview", self.lang))
         ax.set_xlim(min(0.0, min(vals) - 0.1), 1.05)
         for i, v in enumerate(vals):
@@ -708,9 +730,9 @@ class PaperExporter:
         feats = self.bundle[f"{stage}_features"]
         imp = pd.DataFrame({"feature": feats, "importance": booster.feature_importances_})
         imp = imp.sort_values("importance", ascending=False).head(int(topn)).iloc[::-1]
-        fig, ax = plt.subplots(figsize=(5.6, max(2.8, 0.34 * len(imp) + 1.0)))
+        fig, ax = plt.subplots(figsize=fig_single(max(2.8, 0.34 * len(imp) + 1.0)))
         ax.barh([paper_label(f, self.lang) for f in imp["feature"]], imp["importance"],
-                color="#4c72b0", alpha=0.88)
+                color=BLUE_SIGNAL, alpha=0.88)
         ax.set_xlabel(axis_label("importance", self.lang))
         fig.tight_layout()
         saved, stem = self._save_fig(fig, f"Fig_C_{target_slug(target)}_Importance_Top{int(topn)}")
@@ -724,7 +746,9 @@ class PaperExporter:
                               data_file=Path(data).name, extra={"plot": "feature_importance",
                                                                 "topn": int(topn)},
                               caption=self._cap("importance", target))
-        self._analysis_for("importance", Path(saved[0]).stem, target=target,
+        self._analysis_for("importance", Path(saved[0]).stem,
+                           eid=f"fig.importance_{stage}_{target_slug(target).lower()}",
+                           target=target,
                            n=int(len(self.df)),
                            top_features=[paper_label(f, self.lang) for f in imp["feature"].tolist()[::-1]],
                            model_type="XGBoost", cv_method="分组交叉验证训练的最终部署模型",
@@ -748,11 +772,11 @@ class PaperExporter:
             expl = shap.TreeExplainer(booster)
             sv = expl.shap_values(Xi)
             apply_paper_style(self.lang)
-            fig = plt.figure(figsize=(7.2, 5.4))
+            fig = plt.figure(figsize=fig_double(5.4))
             shap.summary_plot(sv, Xi, feature_names=[paper_label(f, self.lang) for f in X.columns],
                               show=False)
             fig = plt.gcf()
-            fig.set_size_inches(7.2, 5.4)
+            fig.set_size_inches(*fig_double(5.4))
             fig.tight_layout()
         except Exception as e:
             raise PaperOutputError(f"当前模型暂未启用该 SHAP 解释方式。（{type(e).__name__}）")
@@ -782,7 +806,7 @@ class PaperExporter:
             col = list(X.columns).index(feature)
         except Exception as e:
             raise PaperOutputError(f"当前模型暂未启用该 SHAP 解释方式。（{type(e).__name__}）")
-        fig, ax = plt.subplots(figsize=(5.2, 4.0))
+        fig, ax = plt.subplots(figsize=fig_single(3.6))
         sc = ax.scatter(X[feature], sv[:, col], s=22, c=sv[:, col], cmap="coolwarm", alpha=0.8)
         ax.set_xlabel(paper_label(feature, self.lang))
         ax.set_ylabel(axis_label("SHAP值", self.lang))
@@ -827,8 +851,8 @@ class PaperExporter:
             Xc = X.copy()
             Xc[feature] = v
             means.append(float(model.predict(Xc).mean()))
-        fig, ax = plt.subplots(figsize=(4.8, 3.6))
-        ax.plot(grid, means, "-", color="#4c72b0", linewidth=1.6)
+        fig, ax = plt.subplots(figsize=fig_single(3.2))
+        ax.plot(grid, means, "-", color=BLUE_SIGNAL, linewidth=1.6)
         ax.set_xlabel(paper_label(feature, self.lang))
         ax.set_ylabel(axis_label("PDP响应", self.lang))
         ax.set_title(f"{'部分依赖图（PDP）' if self.lang == 'zh' else 'Partial Dependence Plot (PDP)'}"
@@ -877,7 +901,8 @@ class PaperExporter:
         n_items = sum(len(items) for _, items in levels)
         total = len(levels) * 0.055 + n_items * 0.024 + (len(levels) - 1) * 0.05
         fig_h = max(5.0, 9.0 * total + 1.0)
-        fig, ax = plt.subplots(figsize=(7.6, fig_h))
+        # V1.6：双栏 183mm 版式；箭头/边框改中性灰家族
+        fig, ax = plt.subplots(figsize=fig_double(fig_h))
         ax.axis("off")
         y = 0.99
         dy_t = 0.05    # 标题行高
@@ -895,12 +920,13 @@ class PaperExporter:
                     txt = f"{label}: {value:.2f}"
                 ax.text(0.5, y, txt, ha="center", va="center", fontsize=8.5,
                         transform=ax.transAxes,
-                        bbox=dict(boxstyle="round,pad=0.25", fc="#f2f4f8", ec="#8899aa", lw=0.6))
+                        bbox=dict(boxstyle="round,pad=0.25", fc=GRAY_PAPER,
+                                  ec=GRAY_BORDER, lw=0.6))
                 y -= dy_i
             if li < len(levels) - 1:
                 ax.annotate("", xy=(0.5, y - dy_a * 0.6), xytext=(0.5, y),
                             xycoords="axes fraction",
-                            arrowprops=dict(arrowstyle="-|>", color="#555555", lw=1.0))
+                            arrowprops=dict(arrowstyle="-|>", color=GRAY_REF, lw=1.0))
                 y -= dy_a
         fig.tight_layout()
         saved, stem = self._save_fig(fig, "Fig_D1_Process_to_Performance_Chain")
@@ -944,7 +970,7 @@ class PaperExporter:
         if front.empty:
             raise PaperOutputError("没有找到满足当前约束的候选点，无法绘制 Pareto 前沿。")
         apply_paper_style(self.lang)
-        fig, ax = plt.subplots(figsize=(5.4, 4.4))
+        fig, ax = plt.subplots(figsize=fig_single(4.4))
         cx = f"pred_{x_obj}"; cy = f"pred_{y_obj}"; cc = f"pred_{color_obj}"
         # V1.5 防御：文献/快速分析数据可能缺部分目标列 → 回退到实际可用的预测目标
         _avail = [c for c in front.columns if c.startswith("pred_") and not c.endswith("_std")]
@@ -952,14 +978,15 @@ class PaperExporter:
             cx = _avail[0]
         if cy not in front.columns and len(_avail) > 1:
             cy = _avail[1] if _avail[1] != cx else _avail[-1]
-        ax.scatter(cand[cx], cand[cy], s=10, c="#bbbbbb", alpha=0.45, label=misc_label("candidates", self.lang))
+        # V1.6：候选点中性灰半透明、前沿信号蓝描边（同源色板）
+        ax.scatter(cand[cx], cand[cy], s=10, c=GRAY_REF, alpha=0.45, label=misc_label("candidates", self.lang))
         if cc in front.columns and cc not in (cx, cy):
             sc = ax.scatter(front[cx], front[cy], c=front[cc], s=42, cmap="viridis",
-                            edgecolors="#5C86AC", linewidths=0.9, label=misc_label("pareto_front", self.lang), zorder=3)
+                            edgecolors=BLUE_SIGNAL, linewidths=0.9, label=misc_label("pareto_front", self.lang), zorder=3)
             fig.colorbar(sc, ax=ax, label=paper_label(cc.replace("pred_", ""), self.lang))
         else:
-            ax.scatter(front[cx], front[cy], s=42, c="#A9C9E5",
-                       edgecolors="#5C86AC", linewidths=0.9, label=misc_label("pareto_front", self.lang), zorder=3)
+            ax.scatter(front[cx], front[cy], s=42, c=BLUE_LIGHT,
+                       edgecolors=BLUE_SIGNAL, linewidths=0.9, label=misc_label("pareto_front", self.lang), zorder=3)
         ax.set_xlabel(paper_label(cx.replace("pred_", ""), self.lang))
         ax.set_ylabel(paper_label(cy.replace("pred_", ""), self.lang))
         ax.set_title("Pareto Front", fontsize=12)
@@ -975,6 +1002,7 @@ class PaperExporter:
                                      "note": "no single 'best solution' is labeled"},
                               caption=self._cap("pareto"))
         self._analysis_for("pareto", Path(saved[0]).stem,
+                           eid=f"fig.pareto_front_{target_slug(x_obj).lower()}_{target_slug(y_obj).lower()}",
                            n=int(stats.get("n_feasible", 0)),
                            pareto_count=int(stats.get("n_pareto", 0)),
                            model_type="三级代理模型",
@@ -1024,7 +1052,7 @@ class PaperExporter:
                          "75%": round(float(s.quantile(0.75)), 2),
                          "max": round(float(s.max()), 2)})
         df_t = pd.DataFrame(rows)
-        note = "当前模型与约束条件下的 Pareto 工艺参数范围（非“绝对最佳工艺窗口”）" if self.lang == "zh" else \
+        note = "当前模型与约束条件下的 Pareto 工艺参数范围（不代表普适的工艺区间结论）" if self.lang == "zh" else \
                "Pareto parameter ranges under the current model and constraints"
         if self.demo:
             note = "DEMO SYNTHETIC DATA — FOR SOFTWARE TESTING ONLY | " + note
@@ -1036,14 +1064,14 @@ class PaperExporter:
         if front.empty:
             raise PaperOutputError("没有找到满足当前约束的候选点。")
         params = list(self.schema["process_inputs"])
-        fig, ax = plt.subplots(figsize=(6.2, max(2.8, 0.4 * len(params) + 1.0)))
+        fig, ax = plt.subplots(figsize=fig_mid(max(2.8, 0.4 * len(params) + 1.0)))
         for i, c in enumerate(params):
             lo_s, hi_s = self.schema["process_inputs"][c]["min"], self.schema["process_inputs"][c]["max"]
             lo = (front[c].min() - lo_s) / (hi_s - lo_s)
             hi = (front[c].max() - lo_s) / (hi_s - lo_s)
             med = (front[c].median() - lo_s) / (hi_s - lo_s)
-            ax.plot([lo, hi], [i, i], "-", color="#4c72b0", linewidth=5, alpha=0.6, solid_capstyle="round")
-            ax.plot(med, i, "o", color="#c0392b", markersize=6, zorder=3)
+            ax.plot([lo, hi], [i, i], "-", color=BLUE_SIGNAL, linewidth=5, alpha=0.6, solid_capstyle="round")
+            ax.plot(med, i, "o", color=PINK_ACCENT, markersize=6, zorder=3)
         ax.set_yticks(range(len(params)), [paper_label(c, self.lang) for c in params])
         ax.set_xlim(-0.05, 1.05)
         ax.set_xlabel("0 – 1（在配置允许范围内的归一化位置）" if self.lang == "zh"
@@ -1084,12 +1112,13 @@ class PaperExporter:
         std = unc[f"{target}_std"]
         actual = pd.to_numeric(self.df[target], errors="coerce")
         idx = np.arange(len(pred))
-        fig, ax = plt.subplots(figsize=(7.2, 3.6))
-        ax.errorbar(idx, pred, yerr=std, fmt="o", ms=3.2, ecolor="#9bb7d4",
-                    elinewidth=0.9, capsize=1.6, color="#4c72b0",
+        # V1.6：中幅 120mm；预测点信号蓝、实测对照点中性灰（强调家族留给残差语义）
+        fig, ax = plt.subplots(figsize=fig_mid(3.6))
+        ax.errorbar(idx, pred, yerr=std, fmt="o", ms=3.2, ecolor=BLUE_LIGHT,
+                    elinewidth=0.9, capsize=1.6, color=BLUE_SIGNAL,
                     label=axis_label("预测不确定性", self.lang))
         m = actual.notna()
-        ax.scatter(idx[m], actual[m], s=12, c="#c44e52", zorder=3, label=axis_label("actual", self.lang))
+        ax.scatter(idx[m], actual[m], s=12, c=GRAY_MUTED, zorder=3, label=axis_label("actual", self.lang))
         ax.set_xlabel(axis_label("sample", self.lang))
         ax.set_ylabel(paper_label(target, self.lang))
         ax.legend(loc="best")
@@ -1177,13 +1206,14 @@ class PaperExporter:
         if int(m.sum()) < 3:
             raise PaperOutputError("当前数据不足，无法生成该图。（粒子温度/速度有效值不足）")
         cls_col = self._melt_state_col()
-        fig, ax = plt.subplots(figsize=(5.2, 4.0))
+        # V1.6：单栏 89mm 版式；熔融类别着色改统一分类循环色（禁 seaborn 残留色）
+        fig, ax = plt.subplots(figsize=fig_single(3.8))
         if cls_col:
             labels = self.df.loc[m, cls_col].astype(str)
             order = [c for c in ["insufficiently_molten", "partially_molten",
                                  "fully_molten", "overheated"] if c in set(labels)]
             order += [c for c in sorted(set(labels)) if c not in order]
-            palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
+            palette = list(QUAL_CYCLE)
             for i, lb in enumerate(order):
                 sel = labels == lb
                 name = MELTING_CLASS_ZH.get(lb, lb) if self.lang == "zh" else lb
@@ -1193,7 +1223,7 @@ class PaperExporter:
             title = "颗粒温度—速度状态图（按熔融状态类别着色）" if self.lang == "zh" \
                 else "Particle temperature-velocity map (colored by melting state class)"
         else:
-            ax.scatter(v[m], t[m], s=22, alpha=0.75, edgecolors="none", c="#4c72b0")
+            ax.scatter(v[m], t[m], s=22, alpha=0.75, edgecolors="none", c=BLUE_SIGNAL)
             title = "颗粒温度—速度状态图（无熔融类别标签，仅散点）" if self.lang == "zh" \
                 else "Particle temperature-velocity map (no class labels, scatter only)"
         ax.set_xlabel(axis_label(v_col, self.lang))
@@ -1209,6 +1239,7 @@ class PaperExporter:
                               extra={"plot": "tv_map", "colored_by": cls_col or "none"},
                               caption=self._cap("tv_map") if hasattr(self, "_cap") else None)
         self._analysis_for("tv_map", Path(saved[0]).stem,
+                           eid=f"fig.tv_map_{target_slug(t_col).lower()}",
                            n=int(m.sum()),
                            trend_desc="数据点在粒子温度—速度平面形成特定聚集区，"
                                       "反映当前工艺所覆盖的粒子热动力状态空间。",
@@ -1229,8 +1260,8 @@ class PaperExporter:
         names = [MELTING_CLASS_ZH.get(c, c) if self.lang == "zh" else c for c in order]
         vals = [int(counts[c]) for c in order]
         total = sum(vals)
-        fig, ax = plt.subplots(figsize=(5.2, 3.6))
-        bars = ax.bar(range(len(order)), vals, color="#4c72b0", alpha=0.85)
+        fig, ax = plt.subplots(figsize=fig_single(3.2))
+        bars = ax.bar(range(len(order)), vals, color=BLUE_SIGNAL, alpha=0.85)
         ax.set_xticks(range(len(order)))
         ax.set_xticklabels(names, fontsize=8.5)
         for i, b in enumerate(bars):
@@ -1250,6 +1281,7 @@ class PaperExporter:
                               extra={"plot": "melting_distribution"},
                               caption=self._cap("melting_distribution") if hasattr(self, "_cap") else None)
         self._analysis_for("melting_dist", Path(saved[0]).stem, n=int(total),
+                           eid="fig.melting_distribution",
                            class_counts={MELTING_CLASS_ZH.get(c, c): int(v)
                                          for c, v in zip(order, vals)},
                            trend_desc="各熔融状态类别的样本数与占比存在差异，"
@@ -1267,7 +1299,9 @@ class PaperExporter:
         n_panels = len(cont) + len(cat)
         if n_panels == 0:
             raise PaperOutputError("当前数据不足，无法生成该图。")
-        fig, axes = plt.subplots(1, n_panels, figsize=(4.6 * n_panels, 3.9), squeeze=False)
+        # V1.6：多面板按列数取单栏×n（Nature 模数）；色值全部同源家族
+        fig, axes = plt.subplots(1, n_panels,
+                                 figsize=(fig_single(3.9)[0] * n_panels, 3.9), squeeze=False)
         stats_out = {}
         for j, t in enumerate(cont):
             ax = axes[0][j]
@@ -1277,18 +1311,17 @@ class PaperExporter:
             lo = float(min(actual.min(), pred.min()))
             hi = float(max(actual.max(), pred.max()))
             pad = (hi - lo) * 0.05 + 1e-9
-            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "--", color="#777777",
+            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "--", color=GRAY_REF,
                     linewidth=1.0, zorder=1)
-            ax.scatter(actual, pred, s=24, c="#4c72b0", alpha=0.75, edgecolors="none", zorder=2)
+            ax.scatter(actual, pred, s=24, c=BLUE_SIGNAL, alpha=0.75, edgecolors="none", zorder=2)
             ax.set_xlim(lo - pad, hi + pad)
             ax.set_ylim(lo - pad, hi + pad)
             ax.set_xlabel(axis_label("actual", self.lang))
             ax.set_ylabel(axis_label("predicted", self.lang))
             ax.set_title(f"{paper_label(t, self.lang)} (OOF)", fontsize=10.5)
             stats_out[t] = {"R2": r2, "RMSE": rmse, "MAE": mae, "n": int(len(actual))}
-            ax.text(0.03, 0.97, f"R²={r2:.3f}\nRMSE={rmse:.3g}\nn={len(actual)}",
-                    transform=ax.transAxes, va="top", ha="left", fontsize=8,
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#bbbbbb", alpha=0.85))
+            add_stat_box(ax, f"R²={r2:.3f}\nRMSE={rmse:.3g}\nn={len(actual)}",
+                         loc="upper left")
         for j, t in enumerate(cat, start=len(cont)):
             ax = axes[0][j]
             actual, pred = self._melt_oof(t)
@@ -1305,7 +1338,7 @@ class PaperExporter:
             for i in range(len(classes)):
                 for k in range(len(classes)):
                     ax.text(k, i, str(cm.values[i, k]), ha="center", va="center",
-                            fontsize=7.5, color="#1a1a1a")
+                            fontsize=7.5, color=GRAY_INK)
             acc = float(np.trace(cm.values) / max(1, cm.values.sum()))
             met = (self.metrics.get("stage15") or {}).get(t) or {}
             ax.set_title(f"{paper_label(t, self.lang)} (OOF)\nAcc={acc:.3f} "
@@ -1326,13 +1359,20 @@ class PaperExporter:
                                      "stats": stats_out},
                               caption=self._cap("melting_performance") if hasattr(self, "_cap") else None)
         _r2_first = next((v.get("R2") for v in stats_out.values() if v.get("R2") is not None), None)
+        _eid_h3 = "fig.melting_performance" + (f"_{_slug_first(stats_out)}" if stats_out else "")
         self._analysis_for("melting_perf", Path(saved[0]).stem, r2=_r2_first,
+                           eid=_eid_h3,
                            n=int(len(self.df)), model_type="Stage 1.5 XGBoost",
                            cv_method="分组交叉验证 OOF（连续目标 Parity / 分类目标混淆矩阵）",
                            melting_from_model=True,
                            trend_desc="熔融状态模型的折外预测与实验/文献标签总体一致性见图；"
                                       "分类目标请同时参考平衡准确率。")
         return saved + [data, meta], stem
+
+    @staticmethod
+    def _slug_first(stats_out):
+        """H3 证据 ID 的目标 slug（首个目标，小写字母数字）。"""
+        return "".join(ch for ch in str(next(iter(stats_out), "")).lower() if ch.isalnum())
 
     def _fig_h_corr_grid(self, pair_cols, code, title_zh, title_en):
         """熔融指数与缺陷/性能指标的关联趋势网格（只描述关联，不生成因果结论）。"""
@@ -1347,17 +1387,19 @@ class PaperExporter:
         n = len(pairs)
         ncols = 2 if n > 1 else 1
         nrows = (n + 1) // 2
-        fig, axes = plt.subplots(nrows, ncols, figsize=(4.4 * ncols, 3.5 * nrows), squeeze=False)
+        # V1.6：多面板按列数取单栏×n；散点信号蓝、趋势虚线中性灰
+        _fw = fig_double(3.5 * nrows)[0] if ncols == 2 else fig_single(3.5)[0]
+        fig, axes = plt.subplots(nrows, ncols, figsize=(_fw, 3.5 * nrows), squeeze=False)
         for idx, (x, y) in enumerate(pairs):
             ax = axes[idx // ncols][idx % ncols]
             xv = pd.to_numeric(self.df[x], errors="coerce")
             yv = pd.to_numeric(self.df[y], errors="coerce")
             m = xv.notna() & yv.notna()
-            ax.scatter(xv[m], yv[m], s=20, c="#55a868", alpha=0.7, edgecolors="none")
+            ax.scatter(xv[m], yv[m], s=20, c=BLUE_SIGNAL, alpha=0.7, edgecolors="none")
             if int(m.sum()) >= 3 and xv[m].nunique() > 1:
                 z = np.polyfit(xv[m], yv[m], 1)
                 xs = np.linspace(float(xv[m].min()), float(xv[m].max()), 50)
-                ax.plot(xs, np.polyval(z, xs), "--", color="#777777", linewidth=1.0)
+                ax.plot(xs, np.polyval(z, xs), "--", color=GRAY_REF, linewidth=1.0)
                 r = float(np.corrcoef(xv[m], yv[m])[0, 1])
                 ax.set_title(f"{paper_label(y, self.lang)}  r={r:.2f}", fontsize=9.5)
             else:
@@ -1413,9 +1455,9 @@ class PaperExporter:
             raise PaperOutputError("当前数据不足，无法生成该图。（该模型类型不支持特征重要性）")
         names = self.bundle.get("stage15_features") or []
         imp = pd.Series(booster.feature_importances_, index=names).sort_values(ascending=False).head(15)
-        fig, ax = plt.subplots(figsize=(5.6, 4.2))
+        fig, ax = plt.subplots(figsize=fig_single(4.2))
         y = np.arange(len(imp))[::-1]
-        ax.barh(y, imp.values, color="#8172b3", alpha=0.85)
+        ax.barh(y, imp.values, color=BLUE_SIGNAL, alpha=0.85)
         ax.set_yticks(y)
         ax.set_yticklabels([paper_label(f, self.lang) for f in imp.index], fontsize=8)
         ax.set_xlabel("Feature importance", fontsize=9)
@@ -1506,7 +1548,8 @@ class PaperExporter:
                                  bundle=self.bundle)
             _ctx["_demo"] = self.demo
             md_i, xlsx_i = build_insight_report(_ctx, self.df, self.schema, self.bundle,
-                                                self.run_dir / "insights")
+                                                self.run_dir / "insights",
+                                                registry=self.registry)
             paths.setdefault("insights", []).extend([md_i, xlsx_i])
         except Exception as e:
             log_event("paper_export_i_error", f"{e}")
@@ -1522,6 +1565,20 @@ class PaperExporter:
         # metadata + summary + captions
         self.write_reproducibility_manifest()
         self.write_captions()
+
+        # V1.6（P0-2 验收 6）：evidence_manifest.json 透传进 ZIP 根——
+        # quick run 场景 manifest 位于 run_dir 上一级（runs/quick_analysis/<run_id>/），
+        # 复制到本输出目录根后随 _zip_results 一并打包。
+        try:
+            _mf_local = self.run_dir / "evidence_manifest.json"
+            if not _mf_local.exists():
+                _mf_src = self.run_dir.parent / "evidence_manifest.json"
+                if _mf_src.exists():
+                    shutil.copy2(_mf_src, _mf_local)
+                    paths.setdefault("metadata", []).append(_mf_local)
+        except Exception as e:
+            log_event("paper_export_manifest_error", f"{e}")
+
         top_features = []
         try:
             pipe = list(self.bundle["stage1_models"].values())[0]

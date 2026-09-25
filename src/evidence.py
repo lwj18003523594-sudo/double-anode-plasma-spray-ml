@@ -88,38 +88,43 @@ class EvidenceRegistry:
 
         if degraded:
             item = EvidenceItem(
-                eid=eid, text=DEGRADE_TEXT, source_class=source_class,
+                eid=eid, text=(DEMO_PREFIX if self.demo else "") + DEGRADE_TEXT,
+                source_class=source_class,
                 values={"__degrade_reason": reason, **{k: values.get(k) for k in missing}},
                 computed_by=computed_by, data_version=self.data_version,
                 model_version=self.model_version, rows_filter=rows_filter,
                 files=list(files or []), demo=self.demo, degraded=True,
                 created_at=datetime.now().isoformat(timespec="seconds"))
             self.register(item)
-            return (DEMO_PREFIX if self.demo else "") + DEGRADE_TEXT
+            return item.text
 
         try:
             text = template.format(**values)
         except (KeyError, IndexError, ValueError) as e:
             # 模板引用了未提供的键 → 同样按缺证降级处理，绝不输出半截句子
             item = EvidenceItem(
-                eid=eid, text=DEGRADE_TEXT, source_class=source_class,
+                eid=eid, text=(DEMO_PREFIX if self.demo else "") + DEGRADE_TEXT,
+                source_class=source_class,
                 values={"__degrade_reason": f"模板格式化失败: {e}"},
                 computed_by=computed_by, data_version=self.data_version,
                 model_version=self.model_version, rows_filter=rows_filter,
                 files=list(files or []), demo=self.demo, degraded=True,
                 created_at=datetime.now().isoformat(timespec="seconds"))
             self.register(item)
-            return (DEMO_PREFIX if self.demo else "") + DEGRADE_TEXT
+            return item.text
 
+        # manifest 中落盘的 text 与界面展示句完全一致（含 Demo 前缀），保证三层对齐：
+        # 结论句（UI）↔ manifest text（落盘）↔ values（QA 抽查）
+        full_text = (DEMO_PREFIX if self.demo else "") + text
         item = EvidenceItem(
-            eid=eid, text=text, source_class=source_class,
+            eid=eid, text=full_text, source_class=source_class,
             values={k: v for k, v in values.items()},
             computed_by=computed_by, data_version=self.data_version,
             model_version=self.model_version, rows_filter=rows_filter,
             files=list(files or []), demo=self.demo, degraded=False,
             created_at=datetime.now().isoformat(timespec="seconds"))
         self.register(item)
-        return (DEMO_PREFIX if self.demo else "") + text
+        return full_text
 
     @staticmethod
     def _is_nan(v) -> bool:

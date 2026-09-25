@@ -392,19 +392,14 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         return {"report": str(md), "evidence": str(xlsx)}
     insight_out = step("数据洞察", _insights)
 
-    def _package():
-        prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
-        ex = PaperExporter(df, schema, bundle, lang="zh", formats=("png",),
-                           demo=demo, prefix=prefix, run_dir=results_dir)
-        run_d, zip_p, paths = ex.build_bundle(n_candidates=800)
-        return {"run_dir": str(run_d), "zip": str(zip_p),
-                "figures": len(paths.get("figures", [])),
-                "analysis_dir": str(run_d / "analysis")}
-    pkg = step("科研图表与结果输出", _package)
-
-    # V1.6（P0-2/P0-3）：成功路径落盘 summary.json + evidence_manifest.json（摘要卡数据源）
-    # 注意顺序：先 build_smart_summary（注册 qa.* 证据），再 registry.save 落盘，
-    # 保证摘要卡每条结论都能在 manifest 中溯源（P0-3 验收 2）。
+    # V1.6（P0-2/P0-3）：成功路径落盘 summary.json + evidence_manifest.json（摘要卡数据源）。
+    # 注意顺序（两层）：
+    # ① 先 build_smart_summary（注册 qa.* 证据），再 registry.save 落盘，
+    #    保证摘要卡每条结论都能在 manifest 中溯源（P0-3 验收 2）；
+    # ② 落盘须在 _package 之前——PaperExporter.build_bundle 打包时从
+    #    run_dir.parent 复制 evidence_manifest.json 进 ZIP（P0-2 验收 6）。
+    manifest_path = None
+    summary_path = None
     if bundle:
         try:
             smart = build_smart_summary(
@@ -421,6 +416,16 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         except Exception as e:
             steps.append(("证据清单落盘", "fail", str(e)))
             manifest_path = None
+
+    def _package():
+        prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
+        ex = PaperExporter(df, schema, bundle, lang="zh", formats=("png",),
+                           demo=demo, prefix=prefix, run_dir=results_dir)
+        run_d, zip_p, paths = ex.build_bundle(n_candidates=800)
+        return {"run_dir": str(run_d), "zip": str(zip_p),
+                "figures": len(paths.get("figures", [])),
+                "analysis_dir": str(run_d / "analysis")}
+    pkg = step("科研图表与结果输出", _package)
 
     return _finish(run_id, mode_id, steps, bundle, schema,
                    {"explain": explain, "insight": insight_out, "package": pkg,
