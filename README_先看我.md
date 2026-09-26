@@ -5,6 +5,22 @@
 > 多目标优化。只有粒子温度/速度的 APS 文献表只运行过程模型，不生成涂层性能
 > Pareto 结论。复现步骤和本地指标见 [智能分析故障修复说明](docs/QUICK_ANALYSIS_V1.8_FIX.md)。
 
+### macOS 上传后出现 `load_quick_workspace` 报错？
+
+这表示本机 `app.py` 已更新，但 `src/quick_analysis.py` 仍是旧文件，和工作簿数值无关。
+**不能只复制 `app.py`，需要整套更新程序模块。**
+
+1. 从 [GitHub main 分支](https://github.com/lwj18003523594-sudo/double-anode-plasma-spray-ml/archive/refs/heads/main.zip) 下载完整 ZIP 并解压。
+2. 在**新解压的文件夹**双击 `04_同步源码.command`。默认更新 Mac 下载目录内的
+   `DoubleAnode_ML_Foolproof`；如安装在其他位置，可在终端传入现有平台目录作为第一个参数。
+3. 该操作先备份原有程序文件，再更新 `app.py`、`src/`、`scripts/` 等代码；
+   保留原有 `.venv/`、`data/`、`models/`、`runs/`、`outputs/` 和 `config/`。
+   完成后重启旧平台进程，再双击桌面按钮启动。
+4. 若之前的 Quick Run 缺少新版本的数据快照，重新上传工作簿并点一次“智能分析”。
+
+如果现有目录是未改动源码的 Git 仓库，也可在该目录执行 `git pull --ff-only origin main`；
+发生本地修改冲突时先备份核对，切勿用 `git reset --hard` 清理真实数据。
+
 ## V1.8 更新了什么（2026-09）
 
 **系统优化与验收严谨化**（按外部审计方案，P0+P1 全量）：
