@@ -80,10 +80,13 @@ class PaperExporter:
 
     def __init__(self, df, schema, bundle, lang="zh", formats=("png", "svg"),
                  demo=False, run_dir=None, run_prefix="Run", prefix=None,
-                 registry=None):
+                 registry=None, objective_cfg=None):
         self.df = df
         self.schema = schema
         self.bundle = bundle
+        # None preserves the legacy configured export. A supplied configuration
+        # belongs to this run and must be used consistently in every E figure/table.
+        self.objective_cfg = objective_cfg
         self.lang = lang
         self.formats = ("png_svg" if f == "png_svg" else f for f in formats)
         self.formats = tuple(self.formats)
@@ -214,11 +217,14 @@ class PaperExporter:
     def _cap(self, kind, target=None, model_type=None, n=None):
         """客观图注草稿：只描述变量/模型/CV方式/数据类型，无机理与因果结论。"""
         lang = self.lang
-        dtype = "模拟演示数据（仅软件测试）" if self.demo else "真实实验数据"
-        dtype_en = "synthetic demo data (software testing only)" if self.demo else "real experimental data"
+        literature = self.demo_prefix.startswith("QUICK_LIT_")
+        dtype = ("模拟演示数据（仅软件测试）" if self.demo else
+                 "文献数据（工艺体系以原文为准）" if literature else "真实实验数据")
+        dtype_en = ("synthetic demo data (software testing only)" if self.demo else
+                    "published literature data" if literature else "real experimental data")
         t = paper_label(target, lang) if target else ""
-        cv = "GroupKFold 按喷涂批次分组的全链交叉验证" if lang == "zh" else \
-             "full-chain cross-validation with GroupKFold grouped by spray batch"
+        cv = self.cv.get("method") or ("未记录交叉验证方式" if lang == "zh" else
+                                        "cross-validation method unavailable")
         if kind == "parity":
             return (f"图为{t}的实验值与预测值对比。预测值来自{cv}的折外（OOF）预测；"
                     f"模型类型：{model_type}；样本数 n={n}；数据类型：{dtype}。虚线为 y=x 参考线。"
@@ -264,6 +270,10 @@ class PaperExporter:
                     if lang == "zh" else
                     f"Distributions of main process parameters (histograms); data: {dtype_en}.")
         if kind == "pareto":
+            if self.objective_cfg is not None:
+                names = list(self.objective_cfg.get("objectives", {}))
+                return (f"图为已确认优化目标 {', '.join(names)} 的 Pareto 非支配解；"
+                        f"数据类型：{dtype}；候选点为模型预测，不是验证实验。")
             return (f"图为多目标 Pareto 非支配解在预测孔隙率—预测结合强度平面上的分布，"
                     f"颜色表示预测耦合损伤。结果来自当前三级代理模型与给定约束下的候选搜索，"
                     f"不构成单一最佳方案。数据类型：{dtype}。"
@@ -376,10 +386,10 @@ class PaperExporter:
         lines = ["# 结果摘要（Results Summary）", "",
                  f"- 生成时间：{man['date']}",
                  f"- 数据版本：{man['dataset_version']}　模型版本：{man['model_version']}",
-                 f"- 样本数：{man['sample_count']}　喷涂批次数：{man['batch_count']}",
+                 f"- 样本数：{man['sample_count']}　喷涂批次数：{man['batch_count'] if man['batch_count'] is not None else '未提供'}",
                  f"- 交叉验证方法：{man['cv_method']}",
-                 f"- 模式：{'DEMO 模拟数据（仅测试软件功能，不得用于科研结论）' if self.demo else '真实实验数据'}",
-                 "", "## 模型评价（全链分组交叉验证，非训练集拟合值）", ""]
+                 f"- 模式：{'DEMO 模拟数据（仅测试软件功能，不得用于科研结论）' if self.demo else '文献数据（不可直接验证双阳极性能）' if self.demo_prefix.startswith('QUICK_LIT_') else '真实实验数据'}",
+                 "", "## 模型评价（折外交叉验证，非训练集拟合值）", ""]
         for stage in ["stage1", "stage2", "stage3"]:
             lines.append(f"### {stage_paper_label(stage, self.lang)}")
             lines.append("")
@@ -953,10 +963,17 @@ class PaperExporter:
     # ---------- 模块 E：Pareto ----------
     def _pareto(self, n_candidates=2500, x_obj="porosity_pct", y_obj="bond_strength_MPa",
                 color_obj="coupled_damage_rate"):
-        obj_cfg = {"objectives": {"porosity_pct": "minimize", "bond_strength_MPa": "maximize",
+        obj_cfg = self.objective_cfg if self.objective_cfg is not None else {
+                   "objectives": {"porosity_pct": "minimize", "bond_strength_MPa": "maximize",
                                   "coupled_damage_rate": "minimize"},
                    "constraints": {"deposition_efficiency_pct": {"min": 45},
                                    "powder_feed_g_min": {"min": 15}}}
+        if self.objective_cfg is not None:
+            targets = list(obj_cfg.get("objectives", {}))
+            if len(targets) < 2:
+                raise PaperOutputError("至少需要两个已训练涂层性能目标才能生成 Pareto 图表")
+            x_obj, y_obj = targets[:2]
+            color_obj = targets[2] if len(targets) > 2 else None
         fixed = {col: (float(s["min"]) + float(s["max"])) / 2
                  for col, s in self.schema["structure_inputs"].items()}
         front, stats, candidates = random_pareto_search(
@@ -966,12 +983,14 @@ class PaperExporter:
 
     def fig_e_pareto(self, n_candidates=2500, x_obj="porosity_pct", y_obj="bond_strength_MPa",
                      color_obj="coupled_damage_rate"):
-        front, stats, cand, _ = self._pareto(n_candidates, x_obj, y_obj, color_obj)
+        front, stats, cand, (x_obj, y_obj, color_obj) = self._pareto(
+            n_candidates, x_obj, y_obj, color_obj)
         if front.empty:
             raise PaperOutputError("没有找到满足当前约束的候选点，无法绘制 Pareto 前沿。")
         apply_paper_style(self.lang)
         fig, ax = plt.subplots(figsize=fig_single(4.4))
-        cx = f"pred_{x_obj}"; cy = f"pred_{y_obj}"; cc = f"pred_{color_obj}"
+        cx = f"pred_{x_obj}"; cy = f"pred_{y_obj}"
+        cc = f"pred_{color_obj}" if color_obj else None
         # V1.5 防御：文献/快速分析数据可能缺部分目标列 → 回退到实际可用的预测目标
         _avail = [c for c in front.columns if c.startswith("pred_") and not c.endswith("_std")]
         if cx not in front.columns and _avail:
@@ -993,7 +1012,7 @@ class PaperExporter:
         ax.legend(loc="best")
         fig.tight_layout()
         saved, stem = self._save_fig(fig, f"Fig_E1_Pareto_Front_{target_slug(x_obj)}_{target_slug(y_obj)}")
-        data = self._save_data(front[[c for c in [cx, cy, cc] if c in front.columns] +
+        data = self._save_data(front[[c for c in [cx, cy, cc] if c and c in front.columns] +
                                      list(self.schema["process_inputs"])],
                                f"Data_E1_Pareto_Front_{target_slug(x_obj)}_{target_slug(y_obj)}")
         meta = self._fig_meta("E", Path(saved[0]).stem, data_file=Path(data).name,
@@ -1023,8 +1042,11 @@ class PaperExporter:
             row = {"方案编号": i}
             for c in self.schema["process_inputs"]:
                 row[paper_label(c, self.lang)] = round(float(r[c]), 2)
-            for t in ["porosity_pct", "bond_strength_MPa", "coupled_damage_rate",
-                      "deposition_efficiency_pct"]:
+            targets = (list(self.objective_cfg.get("objectives", {}))
+                       if self.objective_cfg is not None else
+                       ["porosity_pct", "bond_strength_MPa", "coupled_damage_rate",
+                        "deposition_efficiency_pct"])
+            for t in targets:
                 if f"pred_{t}" not in r:
                     continue  # V1.5 防御：目标列缺失时跳过该列
                 row[f"预测{paper_label(t, self.lang)}"] = round(float(r[f"pred_{t}"]), 3)
@@ -1504,19 +1526,22 @@ class PaperExporter:
                     pass
 
         # D
-        self._collect(paths, self.fig_d_chain())
+        if self.bundle.get("stage3_models"):
+            self._collect(paths, self.fig_d_chain())
 
         # E（V1.5：分步容错——文献/快速分析数据缺目标列时跳过 E，不影响其他模块）
-        try:
-            self._collect(paths, self.fig_e_pareto(n_candidates=n_candidates)[0:2])
-            p, _, stats = self.table_e1(n_candidates); paths["tables"].append(p)
-            p, rng_df = self.table_e2_ranges(n_candidates); paths["tables"].append(p)
-            self._collect(paths, self.fig_e2_ranges(n_candidates))
-        except PaperOutputError:
-            stats, rng_df = None, pd.DataFrame()
-        except Exception as e:
-            log_event("paper_export_e_error", f"{e}")
-            stats, rng_df = None, pd.DataFrame()
+        stats, rng_df = None, pd.DataFrame()
+        if self.bundle.get("stage3_models") and (self.objective_cfg is None or
+                                                   len(self.objective_cfg.get("objectives", {})) >= 2):
+            try:
+                self._collect(paths, self.fig_e_pareto(n_candidates=n_candidates)[0:2])
+                p, _, stats = self.table_e1(n_candidates); paths["tables"].append(p)
+                p, rng_df = self.table_e2_ranges(n_candidates); paths["tables"].append(p)
+                self._collect(paths, self.fig_e2_ranges(n_candidates))
+            except PaperOutputError:
+                pass
+            except Exception as e:
+                log_event("paper_export_e_error", f"{e}")
 
         # F（每个 GP 目标）
         for t in list(self.bundle.get("stage3_models", {}).keys()):
