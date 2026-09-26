@@ -67,6 +67,7 @@ def test_literature_process_only():
                                default_timeout=90)
         at.session_state["research_mode"] = "literature"
         at.session_state["active_quick_run_id"] = result["run_id"]
+        at.session_state["smart_summary_run_id"] = result["run_id"]
         at.run()
         assert not at.exception, [str(x.message) for x in at.exception]
         assert len(at.tabs) == 8
@@ -76,6 +77,21 @@ def test_literature_process_only():
         assert any("已加载快速运行" in str(x.value) for x in at.success)
         assert any("当前运行已生成过程模型" in str(x.value) for x in at.info)
         assert not any("请先训练模型" in str(x.value) for x in at.warning)
+        assert any("本次智能分析结果" in str(x.value) for x in at.markdown)
+        assert any("尚无可用的涂层性能模型" in str(x.value) for x in at.info)
+        for title in ("查看完整指标、影响因素与数据覆盖", "查看结论依据与运行信息",
+                      "研究路线（可选）", "平台状态与证据概览（可选）"):
+            assert any(title in x.label for x in at.expander), title
+        at.session_state["qa_file_cache"] = Path(__file__)
+        at.session_state["qa_file_hash"] = "regression-file"
+        at.session_state["qa_last_analyzed_hash"] = "regression-file"
+        at.session_state["qa_last_analyzed_run_id"] = result["run_id"]
+        at.run()
+        assert at.button(key="smart_analyze_btn").label == "查看本次结果"
+        history_count = len(qa.load_history())
+        at.button(key="smart_analyze_btn").click().run()
+        assert not at.exception, [str(x.message) for x in at.exception]
+        assert len(qa.load_history()) == history_count  # Viewing must not retrain.
         at.sidebar.selectbox[0].select("正式数据与模型").run()
         assert not at.exception, [str(x.message) for x in at.exception]
         assert at.session_state["ctx"]["active_run_id"] is None

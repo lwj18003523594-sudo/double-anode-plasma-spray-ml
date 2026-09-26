@@ -190,18 +190,12 @@ button[data-testid="stBaseButton-primary"]:disabled {opacity:0.6;}
 .step-node.fail {border-color:var(--sem-bad); color:var(--sem-bad); background:#FFF5F6;}
 .step-msg {font-size:13px; color:var(--gray-muted); text-align:center; margin:4px 0 8px 0;}
 
-/* V1.6（P0-2）：证据徽标 / Demo 横幅 / 摘要卡 */
+/* 证据徽标与演示数据提示 */
 .ev-badge {display:inline-block; padding:2px 10px; border-radius:6px;
   font-size:12.5px; font-weight:600; white-space:nowrap; vertical-align:middle;}
 .demo-banner {background:var(--pink-light); color:var(--pink-accent);
   border:1px solid var(--pink-mid); border-radius:8px; padding:8px 14px;
   font-size:14px; font-weight:600; margin:8px 0;}
-.sum-card {background:#FFFFFF; border:1px solid var(--gray-border);
-  border-top:3px solid var(--pink-accent); border-radius:10px;
-  padding:16px 20px; margin:12px 0; box-shadow:0 1px 3px rgba(47,52,64,0.06);}
-.sum-card .sum-head {display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center;
-  font-size:14px; color:var(--gray-ink); margin-bottom:8px;}
-.sum-card .sum-title {font-size:17px; font-weight:700; color:var(--gray-ink);}
 
 /* 研究主线卡片（spec 十二）：白底 + 3px 顶部色带，淡蓝/淡樱花粉交替；不裁切文字 */
 .flow-wrap {display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; margin:12px 0 6px 0;}
@@ -521,25 +515,25 @@ def _smart_run_analysis(file_obj):
         return
 
     ok_runs = [r for r in results if not r["record"].get("failed")]
-    summary_lines = []
-    for r in results:
-        steps_txt = "，".join(f"{n}:{s}" + (f"（{rsn}）" if rsn and s in ("skip", "fail") else "")
-                             for n, s, rsn in r["steps"])
-        ok = not r["record"].get("failed")
-        summary_lines.append(
-            f"**Run {r['run_id']}**（{r['mode']}，工作表 {r['record'].get('sheet')}）："
-            + ("完成 ｜ " + steps_txt if ok else "未完成（数据准备检查未通过或训练失败）｜ " + steps_txt))
-        if r.get("package"):
-            summary_lines.append(f"- 结果目录：`{r['package'].get('run_dir')}`"
-                                 f"（图 {r['package'].get('figures')} 张，"
-                                 f"含 Insight_Report、图表解读与 evidence_manifest）")
-    st.markdown("\\n\\n".join(summary_lines))
+    if len(results) > 1 or len(ok_runs) != len(results):
+        st.caption(f"本次共分析 {len(results)} 个工作表，完成 {len(ok_runs)} 个。")
+        with st.expander("查看各工作表处理记录", expanded=len(ok_runs) != len(results)):
+            for r in results:
+                st.markdown(f"**{r['record'].get('sheet') or r['run_id']}**："
+                            + ("已完成" if not r["record"].get("failed") else "未完成"))
+                for name, status_, reason in r["steps"]:
+                    if status_ in ("fail", "skip"):
+                        st.caption(f"{name}：{'失败' if status_ == 'fail' else '跳过'}"
+                                   + (f"（{reason}）" if reason else ""))
     st.session_state["qa_state"] = {"last_results": [
         {k: r[k] for k in ("run_id", "mode", "record")} for r in results]}
 
     if ok_runs:
         # 默认展示最近一次成功 run（已拍板决策 §八.3）
         st.session_state["smart_summary_run_id"] = ok_runs[-1]["run_id"]
+        st.session_state["sum_run_pick"] = ok_runs[-1]["run_id"]
+        st.session_state["qa_last_analyzed_hash"] = st.session_state.get("qa_file_hash")
+        st.session_state["qa_last_analyzed_run_id"] = ok_runs[-1]["run_id"]
         if ok_runs[-1]["mode"] == MODE_ID:
             st.session_state["active_quick_run_id"] = ok_runs[-1]["run_id"]
         st.session_state["smart_step"] = {"step": 3, "state": "done", "msg": ""}
@@ -567,109 +561,138 @@ def _smart_run_analysis(file_obj):
 
 
 def render_smart_summary(run_id):
-    """智能分析摘要卡（P0-3）：顶部元信息 / 证据区 / 结论区（徽标可溯源）/ 行动区。
-
-    数据源：qa.load_smart_summary(run_id) + EvidenceRegistry.load(run_dir)；
-    旧 run 无 manifest → evidence.legacy_run_notice()（已拍板兼容方案）。
-    """
+    """A short, honest result first; full metrics and registered evidence on demand."""
     summ = qa.load_smart_summary(run_id)
     run_dir = qa.QUICK_ROOT / str(run_id)
     if summ is None:
-        st.info(f"运行 {run_id} 未生成智能摘要（可能为 V1.5 旧版运行或缺 summary.json）。")
-        evidence_mod.legacy_run_notice()
+        st.info(f"运行 {run_id} 没有可展示的摘要，请重新运行智能分析。")
         return
     registry = evidence_mod.EvidenceRegistry.load(run_dir)
+    head, stages = summ.get("header") or {}, summ.get("stages") or {}
     demo = bool(summ.get("demo"))
-    head = summ.get("header") or {}
+    process_rows = stages.get("stage1") or []
+    performance_rows = stages.get("stage3") or []
+    primary_rows = performance_rows or process_rows or stages.get("stage2") or []
+    primary_label = ("涂层性能" if performance_rows else
+                     "过程状态" if process_rows else "涂层缺陷")
+    cv_method = str(head.get("cv_method") or "未记录")
 
-    st.markdown('<div class="sum-card">', unsafe_allow_html=True)
-    # ① 顶部：Run 元信息 + status-pill（全部真实计算值）
-    _pills = [f"研究模式：{summ.get('mode_label', summ.get('mode', '—'))}",
-              f"n={head.get('n', '—')}",
-              f"数据版本 {head.get('data_version') or '—'}",
-              f"模型版本 {str(head.get('model_version') or '—').split('_')[-1]}",
-              f"CV: {head.get('cv_method') or '—'}"]
-    if head.get("stage15"):
-        _pills.append("Stage 1.5 已启用")
-    if demo:
-        _pills.append("演示数据")
-    st.markdown(
-        f'<div class="sum-head"><span class="sum-title">智能分析摘要 · Run {run_id}</span>'
-        + "".join(f'<span class="status-pill" style="color:var(--blue-signal);'
-                  f'background:var(--blue-faint);border:1px solid var(--blue-light);">{p}</span>'
-                  for p in _pills) + "</div>", unsafe_allow_html=True)
-    if demo:
-        st.markdown(f'<div class="demo-banner">{EVIDENCE_LABELS["demo_notice"]}</div>',
-                    unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("### 本次智能分析结果")
+        st.caption(f"{summ.get('mode_label') or summ.get('mode') or '研究模式未记录'} · "
+                   f"{head.get('n') or '—'} 条记录 · "
+                   f"{'演示数据' if demo else '实测/文献数据'}")
+        if demo:
+            evidence_mod.demo_banner()
 
-    # ② 证据区：各 Stage 指标小表 + Top 5 特征重要性（统一图入口）
-    c_ev1, c_ev2 = st.columns([3, 2])
-    with c_ev1:
+        if primary_rows:
+            st.markdown(f"**已完成：{primary_label}预测**")
+            for group_start in range(0, len(primary_rows), 3):
+                group = primary_rows[group_start:group_start + 3]
+                for col, row in zip(st.columns(len(group)), group):
+                    name = zh(row.get("target", ""))
+                    if "R2" in row:
+                        col.metric(name, f"R² {float(row['R2']):.3f}")
+                        col.caption(f"RMSE {float(row['RMSE']):.3f} · 验证样本 {row.get('n') or head.get('n') or '—'}")
+                    else:
+                        col.metric(name, f"准确率 {float(row.get('Accuracy') or 0):.3f}")
+                        col.caption(f"验证样本 {row.get('n') or head.get('n') or '—'}")
+            st.caption(f"以上为交叉验证结果；验证方式：{cv_method.split(', full-chain')[0]}。"
+                       "数值反映当前数据上的预测表现，不代表实验验证或因果关系。")
+        else:
+            st.info("该运行没有可展示的交叉验证指标；请查看下方运行详情。")
+
+        if not performance_rows:
+            st.info("当前只完成过程/缺陷层分析。尚无可用的涂层性能模型；"
+                    "需补齐涂层性能实测目标及有效样本，才能做性能逆向设计。")
+        elif summ.get("pareto"):
+            st.caption(f"已计算 Pareto 非支配方案 {summ['pareto']['n_pareto']} 个；"
+                       "候选方案及约束请到 ⑦ 核查。")
+        else:
+            st.info("涂层性能模型已训练，但本次未生成 Pareto 方案。"
+                    "请检查目标优化方向与详细运行记录。")
+
+        if summ.get("mode") == MODE_ID:
+            st.markdown("**接下来**：③ 看完整指标 · ⑤ 看影响因素 · ⑥ 看数据洞察 · ⑧ 下载结果"
+                        + (" · ⑦ 核查 Pareto" if summ.get("pareto") else ""))
+            if ACTIVE_QUICK_ID != run_id:
+                st.warning("正在查看历史摘要；③–⑧ 当前使用另一份数据。")
+                if st.button("切换到这次运行", key=f"activate_{run_id}"):
+                    st.session_state["active_quick_run_id"] = run_id
+                    st.rerun()
+        else:
+            st.caption("本次运行属于另一研究模式；先切换左侧研究模式，再到 ③–⑧ 查看。")
+
+        zip_path = next((p for p in (run_dir / "results" / "results.zip",
+                                     run_dir / "results.zip") if p.exists()), None)
+        if zip_path:
+            with zip_path.open("rb") as f:
+                st.download_button("下载本次结果包 ZIP", f,
+                                   file_name=f"{run_id}_results.zip", mime="application/zip",
+                                   key=f"sum_zip_{run_id}")
+        else:
+            st.caption("本次运行未生成结果包 ZIP。")
+
+    with st.expander("查看完整指标、影响因素与数据覆盖", expanded=False):
         stage_rows = []
-        _stage_name = {"stage1": "一级模型", "stage15": "Stage 1.5",
-                       "stage2": "二级模型", "stage3": "三级模型"}
-        for stage, rows in (summ.get("stages") or {}).items():
-            for r in rows:
-                stage_rows.append({
-                    "模型层级": _stage_name.get(stage, stage),
-                    "目标": zh(r.get("target", "")),
-                    "n": r.get("n"),
-                    **({"R²": round(float(r["R2"]), 3), "RMSE": round(float(r["RMSE"]), 3),
-                        "MAE": round(float(r["MAE"]), 3)} if "R2" in r else
-                       {"Accuracy": r.get("Accuracy"), "平衡准确率": r.get("Balanced_Accuracy")}),
-                })
+        stage_names = {"stage1": "过程状态", "stage15": "颗粒熔融", "stage2": "涂层缺陷", "stage3": "涂层性能"}
+        for stage, rows in stages.items():
+            for row in rows:
+                stage_rows.append({"预测层": stage_names.get(stage, stage),
+                                   "目标": zh(row.get("target", "")), "验证样本数": row.get("n"),
+                                   **({"R²": round(float(row["R2"]), 3),
+                                       "RMSE": round(float(row["RMSE"]), 3),
+                                       "MAE": round(float(row["MAE"]), 3)}
+                                      if "R2" in row else
+                                      {"准确率": row.get("Accuracy"),
+                                       "平衡准确率": row.get("Balanced_Accuracy")})})
         if stage_rows:
-            st.dataframe(pd.DataFrame(stage_rows), width="stretch", hide_index=True)
-    with c_ev2:
+            st.dataframe(pd.DataFrame(stage_rows), hide_index=True, width="stretch")
         tf = summ.get("top_features") or []
         if tf:
+            st.caption("下图为过程层首个目标的模型特征重要性；仅表示模型使用特征的程度，不能解释因果。")
             imp_df = pd.DataFrame({"影响因素": [zh(f["feature"]) for f in tf],
                                    "重要性": [f["importance"] for f in tf]})
-            fig_imp = pstyle.importance_chart(imp_df, title="Top 5 特征重要性（一级模型首目标）")
+            fig_imp = pstyle.importance_chart(imp_df, title="过程层特征重要性")
             if demo:
                 pstyle.add_demo_watermark(fig_imp)
             st.plotly_chart(fig_imp, width="stretch", key=f"sum_imp_{run_id}")
-    if summ.get("coverage"):
-        st.caption(f"数据覆盖：{summ['coverage']}")
-    if summ.get("pareto"):
-        st.caption(f"Pareto：非支配方案 {summ['pareto']['n_pareto']} 个"
-                   f"（候选 {summ['pareto']['n_candidates']}，满足约束 {summ['pareto']['n_feasible']}）")
+        if summ.get("coverage"):
+            st.caption(f"数据覆盖：{summ['coverage']}")
 
-    # ③ 结论区：每句带证据徽标，可点开溯源（P0-2 验收 1）
-    st.markdown("**结论（每条可点开「证据详情」溯源）**")
-    conclusions = summ.get("conclusions") or []
-    if not conclusions:
-        st.caption("本 run 未生成证据化结论（可能为旧版运行）。")
-        evidence_mod.legacy_run_notice()
-    for c in conclusions:
-        item = registry.get(c["eid"]) if registry is not None else None
-        evidence_mod.badge_row(c["text"], item, key=run_id)
-
-    # ④ 行动区：下一步指引（Streamlit 无法编程切 Tab，降级为指引 + run_id 复制）+ 下载 ZIP
-    _available = "③ 模型训练查看 CV 指标 ｜ ⑤ 模型解析查看特征贡献 ｜ ⑥ 数据洞察查看数据与模型分析 ｜ ⑧ 结果输出下载结果包"
-    if summ.get("pareto"):
-        _available += " ｜ ⑦ 逆向设计查看 Pareto"
-    else:
-        _available += "。⑦ 逆向设计需补齐涂层性能实测值，并为至少两个可训练目标设定优化方向。"
-    st.markdown("**下一步**：" + _available)
-    if summ.get("mode") == MODE_ID and st.session_state.get("active_quick_run_id") != run_id:
-        if st.button("在 ③–⑧ 页面使用本次运行", key=f"activate_{run_id}"):
-            st.session_state["active_quick_run_id"] = run_id
-            st.rerun()
-    _c_zip = run_dir / "results" / "results.zip"
-    _zip_alt = run_dir / "results.zip"
-    _zip_path = _c_zip if _c_zip.exists() else (_zip_alt if _zip_alt.exists() else None)
-    a1, a2 = st.columns(2)
-    a1.code(run_id, language=None)
-    a1.caption("Run ID（一键复制，用于运行历史 / 设为正式模型）")
-    if _zip_path is not None:
-        with open(_zip_path, "rb") as f:
-            a2.download_button("下载结果包 ZIP（含 evidence_manifest.json）", f,
-                               file_name=_zip_path.name, mime="application/zip",
-                               key=f"sum_zip_{run_id}", use_container_width=True)
-    else:
-        a2.caption("结果包 ZIP 见运行目录（本 run 未打包或已清理）。")
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.expander("查看结论依据与运行信息", expanded=False):
+        st.caption(f"运行编号：{run_id} ｜ 数据版本：{head.get('data_version') or '—'} ｜ "
+                   f"模型版本：{head.get('model_version') or '—'} ｜ 完整 CV 方法：{cv_method}")
+        conclusions = summ.get("conclusions") or []
+        if conclusions:
+            st.dataframe(pd.DataFrame([{"结论": c.get("text", ""),
+                                        "依据类型": EVIDENCE_LABELS.get(c.get("source_class"), "—"),
+                                        "证据编号": c["eid"]}
+                                       for c in conclusions]), hide_index=True, width="stretch")
+            ids = [c["eid"] for c in conclusions]
+            selected = st.selectbox("核对某条结论的计算依据", ids,
+                                    format_func=lambda eid: next(
+                                        (c.get("text", eid)[:55] for c in conclusions if c["eid"] == eid), eid),
+                                    key=f"sum_evidence_{run_id}")
+            item = registry.get(selected) if registry else None
+            if item:
+                st.caption(f"依据：{EVIDENCE_LABELS.get(item.source_class, item.source_class)} ｜ "
+                           f"计算：{item.computed_by or '—'} ｜ "
+                           f"数据版本：{item.data_version or '—'} ｜ 模型版本：{item.model_version or '—'}")
+                if item.values:
+                    st.dataframe(pd.DataFrame([{"字段": k, "数值": str(v)}
+                                               for k, v in item.values.items()]),
+                                 hide_index=True, width="stretch")
+                if item.rows_filter:
+                    st.caption(f"数据行筛选：{item.rows_filter}")
+                if item.files:
+                    st.caption("来源文件：" + "；".join(str(p) for p in item.files))
+                if item.degraded:
+                    st.warning("该结论缺少部分度量，已标记证据不足。")
+            else:
+                evidence_mod.legacy_run_notice()
+        else:
+            st.caption("该运行没有可溯源的结论。")
 
 # ---------------- 左侧操作栏（V1.6 P0-7 验收 4：模式/来源 → 分隔 → 推荐流程 → 分隔 → 状态摘要） ----------------
 with st.sidebar:
@@ -685,17 +708,17 @@ with st.sidebar:
     else:
         st.info("【真实实验数据模式】\n\n请先在「数据管理」页面上传真实数据。")
 
-    st.markdown('<div class="sb-group-title">推荐流程</div>', unsafe_allow_html=True)
-    st.markdown("\n".join(MODE["flow"]))
+    with st.expander("使用步骤（可选）", expanded=False):
+        st.markdown("\n".join(MODE["flow"]))
 
     st.markdown('<div class="sb-group-title">状态摘要</div>', unsafe_allow_html=True)
     model_status_badge()
 
     _sd = current_df()
-    if not USE_DEMO and _sd is not None:
+    if not use_demo and _sd is not None:
         st.markdown('---')
         st.markdown("**当前数据概况**")
-        st.write(f"文件名称：{st.session_state.get('data_name', CURRENT_DATA_FILE.name)}")
+        st.write(f"来源：{'智能分析运行 ' + ACTIVE_QUICK_ID if ACTIVE_QUICK_ID else st.session_state.get('data_name', CURRENT_DATA_FILE.name)}")
         st.write(f"数据记录数：{len(_sd)}")
         st.write(f"独立喷涂批次：{_sd['batch_id'].nunique() if 'batch_id' in _sd else '-'}")
         st.write(f"数据完整率：{completeness_pct(_sd):.1f} %")
@@ -732,44 +755,8 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 with tab0:
     render_tab_header("tab0", CTX)
 
-    # ---------- V1.8（方案 §3）：研究工作台——当前该做什么（阻塞原因 + 下一步 + 待办） ----------
-    with st.container(border=True):
-        _todo = vtrack_mod.pending_counts()
-        _w_kb, _w_next = st.columns([3, 2])
-        with _w_kb:
-            # 阻塞原因判定（按流程链顺序，第一个不满足的即当前阻塞点）
-            if not CTX.get("dataset_loaded"):
-                _block, _act = "数据未加载", "② 数据管理：上传或选择数据来源"
-            elif not CTX.get("model_trained"):
-                _block, _act = "模型未训练", "③ 模型训练：开始训练（约 1–3 分钟）"
-            elif get_bundle() is None:
-                _block, _act = "模型已过期（数据已变化）", "③ 模型训练：用最新数据重新训练"
-            else:
-                _block, _act = None, ("⑦ 逆向设计 → 导出验证任务单，安排实验"
-                                      if len(trainable_optimization_objectives(get_bundle(), obj_cfg)) >= 2 else
-                                      "③ 查看过程层 CV → ⑤ 解释模型 → ⑥ 洞察 → ⑧ 下载结果；性能寻优需补实测目标")
-            st.markdown(f"**下一步**：" + (_act if _block is None
-                        else f"当前阻塞于「{_block}」——{_act}"))
-            # 待办徽标（待测候选 / 待审核实测）
-            _todo_bits = []
-            if _todo["pending_validation"]:
-                _todo_bits.append(f"待回灌候选 {_todo['pending_validation']} 个（⑥ 上传判定）")
-            _cal_b = get_bundle()
-            if _cal_b is not None and calib_mod.calibration_status(
-                    _cal_b.get("model_version")).get("done") is False:
-                _todo_bits.append("L1 未校准（③ 运行校准）")
-            if _todo_bits:
-                st.caption(" ｜ ".join(_todo_bits))
-            else:
-                st.caption("暂无待办事项。")
-        with _w_next:
-            # 一个随状态变化的主要操作（V1.8 方案 §3：工作台首屏原则）
-            if CTX.get("dataset_loaded") and CTX.get("model_trained") and get_bundle() is not None:
-                st.caption("核心动作：" + ("⑦ 逆向设计寻优" if len(
-                                       trainable_optimization_objectives(get_bundle(), obj_cfg)) >= 2 else
-                                       "③/⑤/⑥ 分析过程层，⑧ 下载图表"))
-            else:
-                st.caption("核心动作：② 加载数据 → ③ 训练")
+    if not CTX.get("dataset_loaded") and st.session_state.get("qa_file_cache") is None:
+        st.caption("上传 Excel / CSV 后点击「智能分析」，即可查看本次可用的预测结果。")
 
     # ---------- ⓪ 智能操作区（Smart Actions Hub，P0-1）：首屏第一视觉 ----------
     _smart_run_now = False
@@ -786,10 +773,25 @@ with tab0:
         with c_ana:
             _pending_file = st.session_state.get("qa_file_cache")
             if _pending_file is not None:
-                # 就绪态：有文件未分析 → 直接触发一键分析
-                if st.button(SMART_HUB["btn_analyze"], type="primary", key="smart_analyze_btn"):
-                    _smart_run_now = True
-                st.caption(f"{SMART_HUB['ready_hint']}（文件：{_pending_file.name}）")
+                already_analyzed = (st.session_state.get("qa_last_analyzed_run_id") and
+                                    st.session_state.get("qa_last_analyzed_hash") ==
+                                    st.session_state.get("qa_file_hash"))
+                if already_analyzed:
+                    if st.button("查看本次结果", type="primary", key="smart_analyze_btn"):
+                        rid = st.session_state["qa_last_analyzed_run_id"]
+                        st.session_state["smart_summary_run_id"] = rid
+                        st.session_state["sum_run_pick"] = rid
+                        recent_summary = qa.load_smart_summary(rid)
+                        if recent_summary and recent_summary.get("mode") == MODE_ID:
+                            st.session_state["active_quick_run_id"] = rid
+                        st.rerun()
+                    if st.button("重新分析当前文件（重新训练）", key="smart_reanalyze_btn"):
+                        _smart_run_now = True
+                    st.caption(f"文件：{_pending_file.name} · 已完成分析，查看结果不会重复训练。")
+                else:
+                    if st.button(SMART_HUB["btn_analyze"], type="primary", key="smart_analyze_btn"):
+                        _smart_run_now = True
+                    st.caption(f"{SMART_HUB['ready_hint']}（文件：{_pending_file.name}）")
             elif _qa_hist_now:
                 # 结果态：有最新 run → 刷新摘要卡
                 if st.button(f"{SMART_HUB['btn_analyze']}（查看最新结果）", type="primary",
@@ -876,25 +878,22 @@ with tab0:
             st.session_state["smart_summary_run_id"] = _pick
         render_smart_summary(st.session_state["smart_summary_run_id"])
 
-    # ---------- ⓜ 研究主线卡片 flow-card（V1.5 原样保留） ----------
-    st.markdown("---")
-    st.subheader(f"研究主线 · {MODE['label']}")
-    flow = MODE["research_line"]
-    cards = []
-    for i, (t, items) in enumerate(flow):
-        cards.append(f'<div class="flow-card"><h4>{t}</h4>{"".join(f"<p>{x}</p>" for x in items.split("<br>"))}</div>')
-        if i < len(flow) - 1:
-            cards.append('<div class="flow-arrow">→</div>')
-    st.markdown(f'<div class="flow-wrap">{"".join(cards)}</div>', unsafe_allow_html=True)
-    st.markdown('<p class="chain-note">喷枪结构/工艺 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积（可选）'
-                ' → 缺陷网络 → 涂层性能 → 多目标逆向设计 → 实验验证与模型更新</p>',
-                unsafe_allow_html=True)
+    with st.expander("研究路线（可选）", expanded=False):
+        # ---------- ⓜ 研究主线卡片 flow-card（V1.5 原样保留） ----------
+        st.markdown("---")
+        st.subheader(f"研究主线 · {MODE['label']}")
+        flow = MODE["research_line"]
+        cards = []
+        for i, (t, items) in enumerate(flow):
+            cards.append(f'<div class="flow-card"><h4>{t}</h4>{"".join(f"<p>{x}</p>" for x in items.split("<br>"))}</div>')
+            if i < len(flow) - 1:
+                cards.append('<div class="flow-arrow">→</div>')
+        st.markdown(f'<div class="flow-wrap">{"".join(cards)}</div>', unsafe_allow_html=True)
+        st.markdown('<p class="chain-note">喷枪结构/工艺 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积（可选）'
+                    ' → 缺陷网络 → 涂层性能 → 多目标逆向设计 → 实验验证与模型更新</p>',
+                    unsafe_allow_html=True)
 
     # ---------- ⓝ 运行历史 / 设为正式模型（折叠 expander，V1.5 原样保留） ----------
-    if st.button("进入常规分析模式（数据管理 → 训练 → 预测 → 解析 → 洞察 → 逆向 → 输出）",
-                 key="qa_expert_hint"):
-        st.info("请依次使用顶部导航的 ②–⑧ 页；每个环节可单独控制。")
-
     qa_hist = qa.latest_runs(10)
     if qa_hist:
         with st.expander(f"运行历史（Run History，最近 {len(qa_hist)} 次）", expanded=False):
@@ -920,59 +919,60 @@ with tab0:
                 else:
                     st.warning("请先填写 run_id。")
 
-    # ---------- ⓞ 平台状态面板（P1-2 升级：与 ③⑧ 同源 CTX，禁止二次计算） ----------
-    st.markdown("---")
-    st.subheader("平台状态")
-    d = current_df()
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("当前实验数据量", CTX.get("record_count") if CTX.get("dataset_loaded") else "-")
-    c2.metric("喷涂批次数", CTX.get("batch_count") if CTX.get("batch_count") is not None else "-")
-    c3.metric("数据完整率", f"{completeness_pct(d):.1f} %" if d is not None else "-")
-    c4.metric("数据版本", CTX.get("dataset_version") or "—")
-    c5.metric("模型状态", ("✓ 已训练" if CTX.get("model_trained") else "未训练")
-              + f" ｜ {context_cv_short(CTX)}")
-    c6.metric("数据模式", "模拟数据" if use_demo else "真实数据")
-    st.caption(f"研究模式：{CTX.get('research_mode_label')} ｜ 模型版本：{CTX.get('model_version') or '—'}"
-               f" ｜ 状态与 ③ 模型训练 / ⑧ 结果输出 同源（同一 CTX）。")
+    with st.expander("平台状态与证据概览（可选）", expanded=False):
+        # ---------- ⓞ 平台状态面板（P1-2 升级：与 ③⑧ 同源 CTX，禁止二次计算） ----------
+        st.markdown("---")
+        st.subheader("平台状态")
+        d = current_df()
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("当前实验数据量", CTX.get("record_count") if CTX.get("dataset_loaded") else "-")
+        c2.metric("喷涂批次数", CTX.get("batch_count") if CTX.get("batch_count") is not None else "-")
+        c3.metric("数据完整率", f"{completeness_pct(d):.1f} %" if d is not None else "-")
+        c4.metric("数据版本", CTX.get("dataset_version") or "—")
+        c5.metric("模型状态", ("✓ 已训练" if CTX.get("model_trained") else "未训练")
+                  + f" ｜ {context_cv_short(CTX)}")
+        c6.metric("数据模式", "模拟数据" if use_demo else "真实数据")
+        st.caption(f"研究模式：{CTX.get('research_mode_label')} ｜ 模型版本：{CTX.get('model_version') or '—'}"
+                   f" ｜ 状态与 ③ 模型训练 / ⑧ 结果输出 同源（同一 CTX）。")
 
-    # ---------------- V1.7/V1.8 · 核心价值验证四维证据徽标（首页概览） ----------------
-    # V1.8（方案 §3/§10）：四个证据维度独立判定（非闯关）；绑定当前模型/数据才显示有效通过
-    _cv_status = cvr_mod.core_value_status(
-        (get_bundle() or {}).get("model_version") if get_bundle() else None,
-        (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
-    _pill = {"L1": ("L1 校准", "③ 模型训练"), "L2": ("L2 覆盖+达标", "⑥ 数据洞察"),
-             "L3": ("L3 离线策略评估", "⑥ 数据洞察"), "L4": ("L4 物理合理性", "⑤ 模型解析")}
-    _cols_cv = st.columns(4)
-    for _cc, (_lk, (_lt, _loc)) in zip(_cols_cv, _pill.items()):
-        _v = _cv_status["layers"].get(_lk) or {}
-        if _v.get("passed"):
-            _txt, _bg, _fg = f"✓ {_lt}", "#EAF3FB", "#3D5A78"
-        elif _v.get("done") and _v.get("fresh") is False:
-            _txt, _bg, _fg = f"🕘 {_lt}（历史）", "#F2F7FC", "#98A2B3"
-        elif _v.get("done"):
-            _txt, _bg, _fg = f"△ {_lt}（未通过）", "#FFF5F6", "#B77C87"
+        # ---------------- V1.7/V1.8 · 核心价值验证四维证据徽标（首页概览） ----------------
+        # V1.8（方案 §3/§10）：四个证据维度独立判定（非闯关）；绑定当前模型/数据才显示有效通过
+        _cv_status = cvr_mod.core_value_status(
+            (get_bundle() or {}).get("model_version") if get_bundle() else None,
+            (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
+        _pill = {"L1": ("L1 校准", "③ 模型训练"), "L2": ("L2 覆盖+达标", "⑥ 数据洞察"),
+                 "L3": ("L3 离线策略评估", "⑥ 数据洞察"), "L4": ("L4 物理合理性", "⑤ 模型解析")}
+        _cols_cv = st.columns(4)
+        for _cc, (_lk, (_lt, _loc)) in zip(_cols_cv, _pill.items()):
+            _v = _cv_status["layers"].get(_lk) or {}
+            if _v.get("passed"):
+                _txt, _bg, _fg = f"✓ {_lt}", "#EAF3FB", "#3D5A78"
+            elif _v.get("done") and _v.get("fresh") is False:
+                _txt, _bg, _fg = f"🕘 {_lt}（历史）", "#F2F7FC", "#98A2B3"
+            elif _v.get("done"):
+                _txt, _bg, _fg = f"△ {_lt}（未通过）", "#FFF5F6", "#B77C87"
+            else:
+                _txt, _bg, _fg = f"○ {_lt}（未运行）", "#F2F7FC", "#7A8290"
+            _cc.markdown(
+                f'<span class="status-pill" style="color:{_fg};background:{_bg};">{_txt} · {_loc}</span>',
+                unsafe_allow_html=True)
+        _eff = _cv_status.get("effective") or []
+        _stale = _cv_status.get("stale") or []
+        if _eff:
+            _eff_txt = "、".join(_eff)
+            _stale_txt = (" ｜ 历史结果（旧模型/数据，不计入当前）：" + "、".join(_stale) + "。") if _stale else ""
+            st.caption("当前上下文下有效证据维度：**" + _eff_txt + "**（结果绑定当前模型/数据）。"
+                       + _stale_txt
+                       + " 总报告在「⑧ 结果输出 → 核心价值验证总报告」。")
         else:
-            _txt, _bg, _fg = f"○ {_lt}（未运行）", "#F2F7FC", "#7A8290"
-        _cc.markdown(
-            f'<span class="status-pill" style="color:{_fg};background:{_bg};">{_txt} · {_loc}</span>',
-            unsafe_allow_html=True)
-    _eff = _cv_status.get("effective") or []
-    _stale = _cv_status.get("stale") or []
-    if _eff:
-        _eff_txt = "、".join(_eff)
-        _stale_txt = (" ｜ 历史结果（旧模型/数据，不计入当前）：" + "、".join(_stale) + "。") if _stale else ""
-        st.caption("当前上下文下有效证据维度：**" + _eff_txt + "**（结果绑定当前模型/数据）。"
-                   + _stale_txt
-                   + " 总报告在「⑧ 结果输出 → 核心价值验证总报告」。")
-    else:
-        _stale_txt2 = ("；历史结果（旧模型/数据）：" + "、".join(_stale)) if _stale else ""
-        st.caption("核心价值验证（L1 校准 ｜ L2 覆盖+达标 ｜ L3 离线策略评估 ｜ L4 物理合理性）"
-                   "当前上下文下暂无有效通过的维度"
-                   + _stale_txt2
-                   + "。建议从「③ 模型训练 → L1 校准」开始补齐当前证据。")
+            _stale_txt2 = ("；历史结果（旧模型/数据）：" + "、".join(_stale)) if _stale else ""
+            st.caption("核心价值验证（L1 校准 ｜ L2 覆盖+达标 ｜ L3 离线策略评估 ｜ L4 物理合理性）"
+                       "当前上下文下暂无有效通过的维度"
+                       + _stale_txt2
+                       + "。建议从「③ 模型训练 → L1 校准」开始补齐当前证据。")
 
-    if use_demo and d is not None:
-        evidence_mod.demo_banner()
+        if use_demo and d is not None:
+            evidence_mod.demo_banner()
 
 # ---------------- ② 数据管理 ----------------
 with tab1:
