@@ -12,9 +12,11 @@ Dataset_01 / Dataset_02 … 每个工作表独立 Run，绝不自动合并不同
 """
 import json
 import shutil
+import re
 from datetime import datetime
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -26,6 +28,45 @@ from .evidence import EvidenceRegistry
 QUICK_ROOT = ROOT / "runs" / "quick_analysis"
 HISTORY_FILE = QUICK_ROOT / "run_history.json"
 SUMMARY_NAME = "summary.json"
+WORKSPACE_NAME = "workspace.json"
+
+
+def save_quick_workspace(run_id, df, schema, bundle, objectives=None):
+    """Keep the exact training input and role mapping alongside the isolated run."""
+    from .research_utils import dataset_hash
+    if dataset_hash(df) != str(bundle.get("dataset_hash", ""))[:16]:
+        raise ValueError("快速运行的数据指纹与训练模型不一致")
+    run_dir = QUICK_ROOT / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # Pickle is only read back from a locally created, history-listed run.
+    df.to_pickle(run_dir / "input_data.pkl")
+    (run_dir / WORKSPACE_NAME).write_text(json.dumps({
+        "schema": schema, "objectives": objectives or {},
+        "dataset_hash": bundle["dataset_hash"],
+    }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return run_dir / WORKSPACE_NAME
+
+
+def load_quick_workspace(run_id):
+    """Read a successful local run; reject legacy/mismatched snapshots explicitly."""
+    from .research_utils import dataset_hash
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("无效的快速运行编号")
+    record = next((r for r in load_history() if r.get("run_id") == run_id
+                   and not r.get("failed")), None)
+    if record is None:
+        raise ValueError("该快速运行未完成或已不在运行历史中")
+    run_dir = QUICK_ROOT / run_id
+    if not (run_dir / WORKSPACE_NAME).exists() or not (run_dir / "input_data.pkl").exists():
+        raise ValueError("该运行由旧版本创建，缺少原始数据快照；请重新运行智能分析")
+    meta = json.loads((run_dir / WORKSPACE_NAME).read_text(encoding="utf-8"))
+    df = pd.read_pickle(run_dir / "input_data.pkl")
+    bundle = joblib.load(run_dir / "model.joblib")
+    digest = bundle.get("dataset_hash")
+    if not digest or meta.get("dataset_hash") != digest or dataset_hash(df) != digest[:16]:
+        raise ValueError("快速运行的数据与模型指纹不一致，请重新运行智能分析")
+    return {"df": df, "schema": meta["schema"], "bundle": bundle,
+            "objectives": meta.get("objectives") or {}, "record": record}
 
 META_SHEET_KEYWORDS = ["readme", "source_metadata", "platform_field_mapping",
                        "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata",
@@ -366,6 +407,16 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     if not bundle:
         return _finish(run_id, mode_id, steps, None, None, {}, sheet_name, demo, failed=True)
 
+    directions = confirm_map.get("_directions") if isinstance(confirm_map, dict) else None
+    objectives = {c: d for c, d in (directions or {}).items()
+                  if d in ("maximize", "minimize")
+                  and (c in bundle.get("stage3_models", {}) or
+                       c in bundle.get("stage2_models", {}))}
+    if step("保存运行数据与字段映射",
+            lambda: save_quick_workspace(run_id, df, schema, bundle, objectives)) is None:
+        return _finish(run_id, mode_id, steps, bundle, schema, {}, sheet_name, demo,
+                       failed=True)
+
     # ⑥ 模型解释 + 熔融状态（信息汇总）
     def _explain():
         factors, stability = insight_mod.model_key_factors(bundle)
@@ -381,11 +432,6 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
 
     # ⑧ Pareto（仅当方向已定义；禁止自动认定优化方向）
     pareto_result = {}
-    directions = confirm_map.get("_directions") if isinstance(confirm_map, dict) else None
-    objectives = {c: d for c, d in (directions or {}).items()
-                  if d in ("maximize", "minimize")
-                  and (c in bundle.get("stage3_models", {}) or
-                       c in bundle.get("stage2_models", {}))}
     if not bundle.get("stage3_models") or len(objectives) < 2:
         # 默认全部 prediction_only：跳过 Pareto（spec 二十九）
         step("多目标优化（Pareto）", lambda: None, skippable=True,
