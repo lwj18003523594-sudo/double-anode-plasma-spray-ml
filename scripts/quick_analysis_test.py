@@ -121,7 +121,8 @@ r3 = res3[0]
 skip3 = [(n, rsn) for n, s, rsn in r3["steps"] if s == "skip"]
 check("3b. 未定义方向 → Pareto 自动跳过并提示（不擅自认定优化方向）",
       any("Pareto" in n for n, _ in skip3)
-      and any("未定义优化目标方向" in (rsn or "") for _, rsn in skip3))
+      and any("未定义至少两个已训练的涂层缺陷/性能目标的优化方向" in (rsn or "")
+              or "缺少可训练的涂层性能目标" in (rsn or "") for _, rsn in skip3))
 
 # ---- 4. Run History + 设为正式模型 ----
 hist = qa.latest_runs(10)

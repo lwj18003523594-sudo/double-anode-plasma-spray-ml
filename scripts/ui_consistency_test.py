@@ -13,8 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
 SRC = APP.read_text(encoding="utf-8")
-CSS = re.search(r"<style>(.*?)</style>", SRC, re.S)
-CSS = CSS.group(1) if CSS else ""
+
+
+def _extract_css(src: str) -> str:
+    """提取页面 CSS：V1.6 T03 起 CSS 主体在 _CSS_VARS/_CSS_BODY 字符串常量中；
+    兼容旧版内联 <style>...</style> 块。"""
+    parts = []
+    for var in ("_CSS_VARS", "_CSS_BODY"):
+        m = re.search(var + r'\s*=\s*f?"""(.*?)"""', src, re.S)
+        if m:
+            parts.append(m.group(1))
+    if parts:
+        return "\n".join(parts)
+    m = re.search(r"<style>(.*?)</style>", src, re.S)
+    return m.group(1) if m else ""
+
+
+CSS = _extract_css(SRC)
 
 failures = []
 
@@ -46,7 +61,9 @@ check("2f. 无超大标题（无 45–55px 字号）",
 check("2g. Metric 数字 28–32px", 'stMetricValue"] {font-size: 30px' in CSS)
 
 # 3. 对齐：标题/正文左对齐；正文无两端对齐
-check("3. 正文左对齐且无 justify", "text-align: left" in CSS and "justify" not in CSS)
+#    （只禁 text-align:justify；flex 布局的 justify-content 与文字对齐无关，V1.6 三步指示器合法使用）
+check("3. 正文左对齐且无 justify", "text-align: left" in CSS
+      and not re.search(r"text-align:\s*justify", CSS))
 
 # 4. 间距体系（8/12/16/24/32/48 出现于规则中）
 spacing_ok = all(v in CSS for v in ["24px", "16px", "12px", "8px"])

@@ -1381,7 +1381,7 @@ class PaperExporter:
                                      "stats": stats_out},
                               caption=self._cap("melting_performance") if hasattr(self, "_cap") else None)
         _r2_first = next((v.get("R2") for v in stats_out.values() if v.get("R2") is not None), None)
-        _eid_h3 = "fig.melting_performance" + (f"_{_slug_first(stats_out)}" if stats_out else "")
+        _eid_h3 = "fig.melting_performance" + (f"_{self._slug_first(stats_out)}" if stats_out else "")
         self._analysis_for("melting_perf", Path(saved[0]).stem, r2=_r2_first,
                            eid=_eid_h3,
                            n=int(len(self.df)), model_type="Stage 1.5 XGBoost",
