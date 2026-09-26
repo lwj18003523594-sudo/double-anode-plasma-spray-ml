@@ -88,6 +88,18 @@ required = [
 for rel in required:
     check(f"文件存在: {rel}", (ROOT / rel).exists())
 
+# app.py reads these methods on every rerun. A partial copy of app.py alone
+# can pass dependency checks yet crash as soon as a Quick Run is selected.
+try:
+    sys.path.insert(0, str(ROOT))
+    from src import quick_analysis as quick_module
+    for name in ("latest_runs", "quick_analyze_file", "load_smart_summary",
+                 "save_quick_workspace", "load_quick_workspace"):
+        check(f"智能分析模块接口: {name}", callable(getattr(quick_module, name, None)),
+              f"{quick_module.__file__}")
+except Exception as e:
+    check("智能分析模块可导入", False, repr(e))
+
 # 结果
 print()
 if failures:

@@ -43,6 +43,27 @@ from src import architecture_compare as arch_mod    # V1.8：架构消融对照
 
 st.set_page_config(page_title="双阳极等离子喷涂智能工艺设计平台", layout="wide")
 
+# A locally copied app.py can be newer than src/quick_analysis.py. Catch the
+# mixed installation before a saved Quick Run is selected (or a new one starts).
+_required_quick_api = ("latest_runs", "quick_analyze_file", "load_smart_summary",
+                       "save_quick_workspace", "load_quick_workspace")
+_missing_quick_api = [name for name in _required_quick_api
+                      if not callable(getattr(qa, name, None))]
+if _missing_quick_api:
+    st.error("平台程序文件版本不一致：当前 app.py 与 src/quick_analysis.py 来自不同版本。"
+             "这与上传的 Excel 内容无关，请先更新整套源码。")
+    st.caption("缺少的程序接口：" + "、".join(_missing_quick_api)
+               + f" ｜ 当前程序目录：{ROOT}")
+    if (ROOT / ".git").exists():
+        st.info("请关闭当前平台，在上述目录执行 `git pull --ff-only origin main`，"
+                "再运行 `.venv/bin/python scripts/platform_check.py` 并重新启动。"
+                "若提示存在本地修改，先备份并核对，不要强制重置仓库。")
+    else:
+        st.info("请下载 GitHub main 分支的完整 ZIP，在解压出的文件夹双击"
+                "「04_同步源码.command」。它会备份现有程序文件，并保留本机的 .venv、"
+                "工作簿、模型与分析结果；完成后重新启动平台。")
+    st.stop()
+
 # V1.6（P0-4）：网页图表统一 Nature 模板（白底、衬线字体、同源色板、中性灰网格）。
 # 色板与模板唯一注册处为 src/plot_style.py，替代 V1.5 的手工 template 设置。
 pstyle.register_nature_template()
