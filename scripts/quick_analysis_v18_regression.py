@@ -16,6 +16,7 @@ import pandas as pd
 
 from src import quick_analysis as qa
 from src.paper_labels import target_slug
+from streamlit.testing.v1 import AppTest
 
 
 def test_literature_process_only():
@@ -54,6 +55,38 @@ def test_literature_process_only():
         assert any("缺少可训练的涂层性能目标" in reason for _, status, reason
                    in result["steps"] if status == "skip")
         assert Path(result["package"]["zip"]).exists()
+        workspace = qa.load_quick_workspace(result["run_id"])
+        assert workspace["df"].equals(frame)
+        assert workspace["schema"] == result["schema"]
+        assert workspace["bundle"]["dataset_hash"] == result["bundle"]["dataset_hash"]
+        assert workspace["objectives"] == {}
+
+        # All Streamlit tabs render in one run. A Quick workspace must populate
+        # their shared status without copying the model to formal models/.
+        at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"),
+                               default_timeout=90)
+        at.session_state["research_mode"] = "literature"
+        at.session_state["active_quick_run_id"] = result["run_id"]
+        at.run()
+        assert not at.exception, [str(x.message) for x in at.exception]
+        assert len(at.tabs) == 8
+        assert at.session_state["ctx"]["dataset_loaded"]
+        assert at.session_state["ctx"]["model_trained"]
+        assert at.session_state["ctx"]["active_run_id"] == result["run_id"]
+        assert any("已加载快速运行" in str(x.value) for x in at.success)
+        assert any("当前运行已生成过程模型" in str(x.value) for x in at.info)
+        assert not any("请先训练模型" in str(x.value) for x in at.warning)
+        at.sidebar.selectbox[0].select("正式数据与模型").run()
+        assert not at.exception, [str(x.message) for x in at.exception]
+        assert at.session_state["ctx"]["active_run_id"] is None
+
+        qa.append_history({**result["record"], "run_id": "LEGACY_WITHOUT_SNAPSHOT"})
+        try:
+            qa.load_quick_workspace("LEGACY_WITHOUT_SNAPSHOT")
+        except ValueError as error:
+            assert "缺少原始数据快照" in str(error)
+        else:
+            raise AssertionError("A legacy run must request reanalysis instead of mixing data")
 
 
 if __name__ == "__main__":

@@ -68,16 +68,49 @@ CURRENT_DATA_FILE = data_file(MODE_ID, DATA_KIND)
 MODEL = mode_model_path(MODE_ID)
 OUTPUT_PREFIX = output_prefix(MODE_ID, DATA_KIND)
 
+# A Quick Run is an isolated, selectable workspace. Its data, role mapping and
+# model must always travel together; never silently promote it to formal data.
+_quick_ids = [r["run_id"] for r in qa.latest_runs(30)
+              if not r.get("failed") and r.get("research_mode") == MODE_ID]
+_active_id = st.session_state.get("active_quick_run_id")
+with st.sidebar:
+    _workspace_pick = st.selectbox("当前工作上下文", ["正式数据与模型"] + _quick_ids,
+                                   index=_quick_ids.index(_active_id) + 1
+                                   if _active_id in _quick_ids else 0)
+if _workspace_pick == "正式数据与模型":
+    st.session_state.pop("active_quick_run_id", None)
+    ACTIVE_QUICK_ID = None
+    QUICK_WORKSPACE = None
+else:
+    ACTIVE_QUICK_ID = _workspace_pick
+    st.session_state["active_quick_run_id"] = ACTIVE_QUICK_ID
+    try:
+        _quick_cache = st.session_state.get("quick_workspace_cache") or {}
+        if ACTIVE_QUICK_ID not in _quick_cache:
+            _quick_cache[ACTIVE_QUICK_ID] = qa.load_quick_workspace(ACTIVE_QUICK_ID)
+            st.session_state["quick_workspace_cache"] = _quick_cache
+        QUICK_WORKSPACE = _quick_cache[ACTIVE_QUICK_ID]
+    except (ValueError, OSError, KeyError) as e:
+        st.sidebar.error(f"快速运行无法载入：{e}")
+        QUICK_WORKSPACE = None
+        ACTIVE_QUICK_ID = None
+        st.session_state.pop("active_quick_run_id", None)
+
 # Schema：文献模式由用户变量选择构建运行时版本；其余模式使用配置（已合并材料/熔融可选层）
-if MODE_ID == "literature":
+if QUICK_WORKSPACE is not None:
+    schema = QUICK_WORKSPACE["schema"]
+elif MODE_ID == "literature":
     schema = st.session_state.get("lit_schema") or MODE_SCHEMA
 else:
     schema = MODE_SCHEMA
 obj_cfg = load_objectives()
 if MODE_ID == "literature" and st.session_state.get("lit_objectives"):
     obj_cfg = {"objectives": dict(st.session_state["lit_objectives"]), "constraints": {}}
+if QUICK_WORKSPACE is not None:
+    obj_cfg = {"objectives": QUICK_WORKSPACE["objectives"], "constraints": {}}
 grp = groups(schema)
-use_demo = USE_DEMO  # 兼容既有 DEMO 提示逻辑
+use_demo = (bool(QUICK_WORKSPACE["record"].get("demo"))
+            if QUICK_WORKSPACE is not None else USE_DEMO)
 
 # ---------------- V1.6 全局样式：宋体 + Times New Roman · Nature 淡雅科研风 ----------------
 # 色板唯一定义处 src/plot_style.py：hex 只经 _CSS_VARS 注入，CSS 主体一律 var(--*) 引用。
@@ -215,7 +248,8 @@ section[data-testid="stSidebar"] * {font-size: 14.5px;}
 st.markdown("<style>" + _CSS_VARS + _CSS_BODY + "</style>", unsafe_allow_html=True)
 
 st.title("双阳极等离子喷涂智能工艺设计平台")
-st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 V1.7（核心价值验证 L1→L4）")
+st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 → 颗粒熔融与沉积状态（可选） → 缺陷网络 → 涂层性能 → 数据驱动逆向工艺设计 ｜ 平台版本 "
+           + (ROOT / "VERSION").read_text(encoding="utf-8").strip())
 
 
 # ---------------- 通用辅助 ----------------
@@ -311,6 +345,8 @@ def ensure_thermal_margin(df_):
 
 def current_df():
     """按当前模式 + 数据来源加载当前数据（会话内缓存；上传后自动刷新）。"""
+    if QUICK_WORKSPACE is not None:
+        return QUICK_WORKSPACE["df"]
     cache_key = f"df_{MODE_ID}_{DATA_KIND}"
     if st.session_state.get(cache_key) is not None:
         return st.session_state[cache_key]
@@ -342,6 +378,8 @@ def completeness_pct(df):
 
 def get_bundle():
     """V1.4：按模式隔离的模型（bundle 会话缓存按模式分键，绝不跨模式继承）。"""
+    if QUICK_WORKSPACE is not None:
+        return QUICK_WORKSPACE["bundle"]
     key = f"bundle_{MODE_ID}"
     if st.session_state.get(key):
         return st.session_state[key]
@@ -353,12 +391,21 @@ def get_bundle():
     return None
 
 
+def trainable_optimization_objectives(bundle, cfg):
+    """Require a performance layer and two measured, trained optimization targets."""
+    if not bundle or not bundle.get("stage3_models"):
+        return {}
+    available = set(bundle.get("stage2_models") or {}) | set(bundle["stage3_models"])
+    return {name: direction for name, direction in (cfg.get("objectives") or {}).items()
+            if name in available and direction in ("maximize", "minimize")}
+
+
 def model_status_badge():
     """模型状态徽标（V1.6 色板走 CSS 变量，同源 plot_style）：区分「等待数据」与「未训练」，严格按当前模式判定。"""
     if current_df() is None:
         status = "wait_data"
     else:
-        status = st.session_state.get(f"train_status_{MODE_ID}") or \
+        status = ("done" if QUICK_WORKSPACE is not None else None) or st.session_state.get(f"train_status_{MODE_ID}") or \
             ("done" if MODEL.exists() else "none")
     label, color, bg = {
         "none": ("未训练", "var(--gray-muted)", "var(--gray-paper)"),
@@ -493,8 +540,12 @@ def _smart_run_analysis(file_obj):
     if ok_runs:
         # 默认展示最近一次成功 run（已拍板决策 §八.3）
         st.session_state["smart_summary_run_id"] = ok_runs[-1]["run_id"]
+        if ok_runs[-1]["mode"] == MODE_ID:
+            st.session_state["active_quick_run_id"] = ok_runs[-1]["run_id"]
         st.session_state["smart_step"] = {"step": 3, "state": "done", "msg": ""}
         _prog.update(label="智能分析完成", state="complete")
+        if ok_runs[-1]["mode"] == MODE_ID:
+            st.rerun()  # Rebuild CTX and all tabs from the newly completed run.
     else:
         # 全部失败：如实展示失败原因与检查项，禁止半成品结论（P0-3 验收 4）
         _fail_reasons = []
@@ -595,8 +646,16 @@ def render_smart_summary(run_id):
         evidence_mod.badge_row(c["text"], item, key=run_id)
 
     # ④ 行动区：下一步指引（Streamlit 无法编程切 Tab，降级为指引 + run_id 复制）+ 下载 ZIP
-    st.markdown("**下一步**：前往 ③ 模型训练 查看完整 CV 指标 ｜ ⑤ 模型解析 查看 SHAP/PDP ｜ "
-                "⑥ 数据洞察 查看三源分级 ｜ ⑦ 逆向设计 查看 Pareto ｜ ⑧ 结果输出 下载论文结果包。")
+    _available = "③ 模型训练查看 CV 指标 ｜ ⑤ 模型解析查看特征贡献 ｜ ⑥ 数据洞察查看数据与模型分析 ｜ ⑧ 结果输出下载结果包"
+    if summ.get("pareto"):
+        _available += " ｜ ⑦ 逆向设计查看 Pareto"
+    else:
+        _available += "。⑦ 逆向设计需补齐涂层性能实测值，并为至少两个可训练目标设定优化方向。"
+    st.markdown("**下一步**：" + _available)
+    if summ.get("mode") == MODE_ID and st.session_state.get("active_quick_run_id") != run_id:
+        if st.button("在 ③–⑧ 页面使用本次运行", key=f"activate_{run_id}"):
+            st.session_state["active_quick_run_id"] = run_id
+            st.rerun()
     _c_zip = run_dir / "results" / "results.zip"
     _zip_alt = run_dir / "results.zip"
     _zip_path = _c_zip if _c_zip.exists() else (_zip_alt if _zip_alt.exists() else None)
@@ -615,8 +674,11 @@ def render_smart_summary(run_id):
 # ---------------- 左侧操作栏（V1.6 P0-7 验收 4：模式/来源 → 分隔 → 推荐流程 → 分隔 → 状态摘要） ----------------
 with st.sidebar:
     # 分组一：模式与数据来源提示（顶部模式选择已在 V1.4 区块）
-    if USE_DEMO:
+    if use_demo:
         evidence_mod.demo_banner()
+    elif QUICK_WORKSPACE is not None:
+        st.info(f"当前使用快速运行 {ACTIVE_QUICK_ID}（{len(QUICK_WORKSPACE['df'])} 条记录）。"
+                "③、⑤、⑥、⑧ 共享该运行数据与模型；是否可逆向设计取决于性能目标实测值。")
     elif DATA_KIND == "literature":
         st.info("【文献数据模式】\n\n请在「数据管理」页面上传文献数据表，"
                 "文献模式需自行选择 X / 熔融 / 缺陷 / Y 变量。")
@@ -641,9 +703,11 @@ with st.sidebar:
 # ---------------- V1.5 CurrentContext：全局唯一状态源 + 状态栏 + 详细信息 ----------------
 _d0 = current_df()
 _b0 = get_bundle()
-CTX = build_context(MODE_ID, SOURCE, df=_d0, bundle=_b0,
-                    model_file_exists=MODEL.exists(), source_kind=DATA_KIND,
-                    active_run_id=st.session_state.get("active_run_id"))
+CTX = build_context(MODE_ID, f"快速运行 {ACTIVE_QUICK_ID}" if ACTIVE_QUICK_ID else SOURCE,
+                    df=_d0, bundle=_b0,
+                    model_file_exists=bool(_b0) if ACTIVE_QUICK_ID else MODEL.exists(),
+                    source_kind="quick_analysis" if ACTIVE_QUICK_ID else DATA_KIND,
+                    active_run_id=ACTIVE_QUICK_ID)
 st.session_state["ctx"] = CTX
 st.markdown('<div class="status-bar">' + " ｜ ".join(
     f'<span class="sb-item">{p}</span>' for p in context_status_items(CTX)) + "</div>",
@@ -681,7 +745,9 @@ with tab0:
             elif get_bundle() is None:
                 _block, _act = "模型已过期（数据已变化）", "③ 模型训练：用最新数据重新训练"
             else:
-                _block, _act = None, "⑦ 逆向设计 → 导出验证任务单，安排实验"
+                _block, _act = None, ("⑦ 逆向设计 → 导出验证任务单，安排实验"
+                                      if len(trainable_optimization_objectives(get_bundle(), obj_cfg)) >= 2 else
+                                      "③ 查看过程层 CV → ⑤ 解释模型 → ⑥ 洞察 → ⑧ 下载结果；性能寻优需补实测目标")
             st.markdown(f"**下一步**：" + (_act if _block is None
                         else f"当前阻塞于「{_block}」——{_act}"))
             # 待办徽标（待测候选 / 待审核实测）
@@ -699,7 +765,9 @@ with tab0:
         with _w_next:
             # 一个随状态变化的主要操作（V1.8 方案 §3：工作台首屏原则）
             if CTX.get("dataset_loaded") and CTX.get("model_trained") and get_bundle() is not None:
-                st.caption("核心动作：⑦ 逆向设计寻优（含验证任务单导出）")
+                st.caption("核心动作：" + ("⑦ 逆向设计寻优" if len(
+                                       trainable_optimization_objectives(get_bundle(), obj_cfg)) >= 2 else
+                                       "③/⑤/⑥ 分析过程层，⑧ 下载图表"))
             else:
                 st.caption("核心动作：② 加载数据 → ③ 训练")
 
@@ -915,8 +983,11 @@ with tab1:
         evidence_mod.demo_banner()
     else:
         # V1.4/V1.5：按模式/来源上传；修复上传按钮图标连字重复残片（隐藏图标 + 明确格式说明）
+        if ACTIVE_QUICK_ID:
+            st.caption("当前查看的是智能分析快照；如需导入新的正式数据，请先在左侧切换到「正式数据与模型」。")
         uploaded = st.file_uploader("上传数据文件", type=["xlsx", "xls", "csv"],
-                                    key=f"up_{MODE_ID}_{DATA_KIND}")
+                                    key=f"up_{MODE_ID}_{DATA_KIND}",
+                                    disabled=bool(ACTIVE_QUICK_ID))
         st.caption("支持 XLSX、XLS、CSV")
         if uploaded is not None:
             try:
@@ -1001,7 +1072,7 @@ with tab1:
                 st.dataframe(disp_rep, width="stretch", hide_index=True)
 
         # ---------------- V1.4 文献模式变量选择（spec 37/29/38） ----------------
-        if MODE_ID == "literature" and d is not None:
+        if MODE_ID == "literature" and d is not None and not ACTIVE_QUICK_ID:
             st.markdown("---")
             st.markdown("**文献模式变量选择**（不假设所有文献都符合完整链条）")
             cols_ = [str(c) for c in d.columns]
@@ -1116,9 +1187,11 @@ with tab2:
         elif len(d) <= 25:
             st.info("样本量较小（n ≤ 25）：文献/无批次数据将自动使用 LOOCV。")
 
-        if MODE_ID == "literature" and not st.session_state.get("lit_schema"):
+        if MODE_ID == "literature" and not st.session_state.get("lit_schema") and not ACTIVE_QUICK_ID:
             st.warning("文献模式请先在「数据管理」页完成变量选择并构建运行时 Schema。")
-        _can_train = not _crit
+        if ACTIVE_QUICK_ID:
+            st.info(f"已载入快速运行 {ACTIVE_QUICK_ID} 的模型；训练新正式模型请在左侧切换到「正式数据与模型」。")
+        _can_train = not _crit and not ACTIVE_QUICK_ID
         if _can_train and st.button("🚀 开始模型训练"):
             st.session_state[f"train_status_{MODE_ID}"] = "running"
             with st.spinner("正在训练与全链交叉验证（每个折叠重新训练各级模型，约需 1-3 分钟，请保持页面打开）..."):
@@ -1140,7 +1213,8 @@ with tab2:
         if bundle is not None:
             cv = bundle.get("chain_cv") or {}
             cv_metrics = cv.get("metrics") or {}
-            st.markdown("**全链分组交叉验证指标（按喷涂批次分组，同一批次不跨训练/验证）**")
+            _cv_method = cv.get("method") or "未记录"
+            st.markdown(f"**外层交叉验证指标（{_cv_method}）**")
             rows, weak = [], []
             has_cv = any(cv_metrics.get(s) for s in ["stage1", "stage2", "stage3"])
             if has_cv:
@@ -1221,13 +1295,13 @@ with tab2:
                     info_lines = [
                         f"模型层级：{r['模型层级']}｜目标：{r['预测指标']}｜模型类型：{r['模型类型']}｜"
                         f"R²：{r['决定系数 R²']}｜RMSE：{r['均方根误差 RMSE']}｜MAE：{r['平均绝对误差 MAE']}｜"
-                        f"CV 方法：GroupKFold（按喷涂批次分组）"
+                                      f"CV 方法：{_cv_method}"
                         for r in rows]
                     info_lines.append(f"数据版本：{(bundle.get('dataset_hash') or '-')[:16]}｜"
                                       f"模型版本：{bundle.get('model_version', '-')}")
                     st.code("\n".join(info_lines), language=None)
             if cv.get("method") and cv["method"] != "none":
-                st.caption("指标均为外层分组交叉验证结果（每个折叠重新训练三级模型后仅预测验证批次），"
+                st.caption(f"指标均为外层 {_cv_method} 交叉验证结果（每个折叠重新训练已启用模型后仅预测验证集），"
                            "非训练集拟合值；最终部署模型使用全部数据单独训练，用于实际预测。")
             if weak:
                 st.warning(f"数据显示{'、'.join(weak)}在当前交叉验证设置下预测能力较弱"
@@ -1272,6 +1346,8 @@ with tab2:
             _d_arch = current_df()
             if _d_arch is None:
                 st.info("请先在「② 数据管理」加载数据。")
+            elif not bundle.get("stage3_models"):
+                st.info("本次数据没有涂层性能实测目标，暂无法进行三种性能预测架构的对照。")
             elif st.button("▶ 运行架构消融对照（约 3–8 分钟，三种架构各跑一轮外层 CV）",
                            key="arch_run"):
                 _prog = st.status("架构消融对照运行中…", expanded=True)
@@ -2234,22 +2310,36 @@ with tab6:
                 "搜索 Pareto 非支配工艺方案。")
     if get_bundle() is None:
         st.warning("请先训练模型。")
+    elif len(trainable_optimization_objectives(get_bundle(), obj_cfg)) < 2:
+        st.info("当前运行已生成过程模型，但没有满足多目标涂层性能寻优的条件。"
+                "需补充涂层性能实测数据（如孔隙率、结合强度、耦合腐蚀指标），训练性能层，"
+                "并对至少两个已训练的目标设定最大化或最小化方向；当前不会生成 Pareto 方案。")
+        st.caption("本次仍可在 ③ 查看过程层交叉验证，⑤ 查看特征贡献，⑥ 查看数据洞察，⑧ 下载结果包。")
     else:
         bundle = get_bundle()
         if use_demo:
             st.info(DEMO_RESULT_NOTICE)
 
-        o1, o2, o3 = st.columns(3)
-        o1.markdown('<div class="obj-card"><div class="name">孔隙率</div>'
-                    '<div class="dir">↓ 最小化</div></div>', unsafe_allow_html=True)
-        o2.markdown('<div class="obj-card"><div class="name">结合强度</div>'
-                    '<div class="dir">↑ 最大化</div></div>', unsafe_allow_html=True)
-        o3.markdown('<div class="obj-card"><div class="name">耦合损伤</div>'
-                    '<div class="dir">↓ 最小化</div></div>', unsafe_allow_html=True)
-
-        dep_min = obj_cfg.get("constraints", {}).get("deposition_efficiency_pct", {}).get("min", 45)
-        feed_min = obj_cfg.get("constraints", {}).get("powder_feed_g_min", {}).get("min", 15)
-        st.markdown(f"**工程约束**：沉积效率 ≥ {dep_min:g} %；送粉速率 ≥ {feed_min:g} g/min（当前设置下限）")
+        _active_objectives = trainable_optimization_objectives(bundle, obj_cfg)
+        for _oc, (_name, _direction) in zip(st.columns(min(3, len(_active_objectives))),
+                                            _active_objectives.items()):
+            _oc.markdown(f"**{zh(_name)}**：{'↑ 最大化' if _direction == 'maximize' else '↓ 最小化'}")
+        _available_constraints = (set(bundle.get("stage2_models") or {}) |
+                                  set(bundle.get("stage3_models") or {}) |
+                                  set(schema.get("process_inputs") or {}) |
+                                  set(schema.get("structure_inputs") or {}))
+        _active_constraints = {name: spec for name, spec in
+                               (obj_cfg.get("constraints") or {}).items()
+                               if name in _available_constraints}
+        _skipped_constraints = set(obj_cfg.get("constraints") or {}) - set(_active_constraints)
+        if _active_constraints:
+            st.caption("当前可执行工程约束：" + "；".join(
+                f"{zh(name)} " + "、".join(f"{'≥' if bound == 'min' else '≤'} {value:g}"
+                                         for bound, value in spec.items() if bound in ('min', 'max'))
+                for name, spec in _active_constraints.items()))
+        if _skipped_constraints:
+            st.warning("以下工程约束没有对应输入或预测模型，已跳过：" +
+                       "、".join(zh(c) for c in sorted(_skipped_constraints)))
 
         # V1.3.2：固定结构参数默认值同样优先使用当前训练数据中位数，避免默认即外推
         _defaults_opt = compute_default_inputs(schema, current_df())
@@ -2302,8 +2392,8 @@ with tab6:
 
         if st.button("🧭 开始多目标逆向寻优"):
             with st.spinner("正在搜索 Pareto 工艺窗口..."):
-                _obj_call = {"objectives": obj_cfg.get("objectives", {}),
-                             "constraints": {**obj_cfg.get("constraints", {}), **melt_constraints}}
+                _obj_call = {"objectives": _active_objectives,
+                             "constraints": {**_active_constraints, **melt_constraints}}
                 front, stats = random_pareto_search(
                     bundle, schema, _obj_call, fixed_values=fixed, n_candidates=n,
                     return_stats=True, search_domain=sd)
@@ -2427,6 +2517,19 @@ with tab7:
     if bundle7 is None:
         st.warning("请先在「模型训练」页完成训练。")
     else:
+        if ACTIVE_QUICK_ID:
+            st.success(f"已加载快速运行 {ACTIVE_QUICK_ID} 的结果（与 ③、⑤、⑥ 使用同一数据与模型）。")
+            _quick_zip = qa.QUICK_ROOT / ACTIVE_QUICK_ID / "results" / "results.zip"
+            if _quick_zip.exists():
+                with _quick_zip.open("rb") as _zip_f:
+                    st.download_button("⬇ 下载本次智能分析结果包 ZIP", _zip_f,
+                                       file_name=f"{ACTIVE_QUICK_ID}_results.zip",
+                                       mime="application/zip", key=f"quick_tab8_zip_{ACTIVE_QUICK_ID}")
+            else:
+                st.info("本次运行未生成 ZIP；可使用下方图表工具重新生成。")
+            if not bundle7.get("stage3_models"):
+                st.caption("本数据只有过程状态实测值；性能、Pareto 与实验验证图不适用，"
+                           "现有结果包包含可计算的过程层图表与洞察。")
         if use_demo:
             evidence_mod.demo_banner()
 
@@ -2478,6 +2581,8 @@ with tab7:
             if ts is None:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 st.session_state["out_run_ts"] = ts
+            if ACTIVE_QUICK_ID:
+                return qa.QUICK_ROOT / ACTIVE_QUICK_ID / "manual_reports" / f"Run_{ts}"
             return ROOT / "outputs" / "reports" / f"Run_{ts}"
 
         def _exporter():
@@ -2507,7 +2612,8 @@ with tab7:
                 try:
                     ex = PaperExporter(current_df(), schema, bundle7, lang=plang,
                                        formats=pformats, demo=use_demo, prefix=OUTPUT_PREFIX,
-                                       run_prefix="Paper_Output")
+                                       **({"run_dir": _run_dir() / "complete"} if ACTIVE_QUICK_ID
+                                          else {"run_prefix": "Paper_Output"}))
                     run_dir, zip_path, paths = ex.build_bundle(n_candidates=2500)
                     st.session_state["last_zip"] = str(zip_path)
                     st.success(f"论文图表包已生成：{run_dir.name}（图 {len(paths['figures'])} 张 / "
