@@ -80,7 +80,7 @@ AXIS_LABELS = {
     "SHAP值":     {"zh": "SHAP 值（对预测的贡献）", "en": "SHAP value (impact on prediction)"},
     "PDP响应":    {"zh": "模型平均预测响应", "en": "Mean model response"},
     "相关性":     {"zh": "皮尔逊相关系数（仅表征相关性，不代表因果关系）", "en": "Pearson correlation (not causation)"},
-    "R2overview": {"zh": "决定系数 R²（全链分组交叉验证）", "en": "R² (full-chain grouped CV)"},
+    "R2overview": {"zh": "决定系数 R²", "en": "R²"},
     "预测不确定性": {"zh": "预测值 ± 标准差（部署模型）", "en": "Prediction ± std (deployment model)"},
 }
 
@@ -97,8 +97,10 @@ MISC_LABELS = {
     "identity_line": {"zh": "y = x 参考线", "en": "y = x reference line"},
     "zero_line": {"zh": "零参考线", "en": "Zero reference line"},
     "stat_note_prefix": {"zh": "统计标注", "en": "Statistical annotation"},
-    "cv_note": {"zh": "评价方式：全链分组交叉验证（折外预测，非训练集拟合值）",
-                "en": "Evaluation: full-chain grouped CV (out-of-fold predictions)"},
+    # 注意：CV 显示文案一律由 cv_display_method() 按实际执行方法动态生成，
+    # 本静态标签只保留通用兜底文案，禁止在此硬编码"全链分组"等具体方法。
+    "cv_note": {"zh": "评价方式：折外预测（非训练集拟合值）",
+                "en": "Evaluation: out-of-fold predictions (not training-fit values)"},
     "errbar_note": {"zh": "误差棒为预测标准差（部署模型）",
                     "en": "Error bars: prediction std (deployment model)"},
     "single_col": {"zh": "单栏图（89 mm）", "en": "Single column (89 mm)"},
@@ -146,3 +148,100 @@ def target_slug(name, lang="en"):
         return slug or "field_" + hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:8]
     base = info["abbr"] if lang == "zh" else info["en"]
     return "".join(ch for ch in base if ch.isalnum())
+
+
+# ---------------------------------------------------------------------------
+# CV / Stage 层级显示文案（真实方法字符串 → 用户可读文案）
+#
+# 原则（spec 三十一：自动识别但绝不盲目猜测）：
+# 显示文案必须反映实际执行的验证方式——
+#   - 无批次数据（batch_count 为 None/0）时实际执行的是随机 KFold，严禁显示
+#     「分组交叉验证」；
+#   - 只有 bundle 中确实训练成功了 Stage 2/3，才允许出现「全链」字样。
+# ---------------------------------------------------------------------------
+
+_MODEL_BEHAVIOUR_NOTE = {
+    "zh": "该分析解释的是训练后模型如何使用输入变量，属于模型行为描述，不构成物理因果结论。",
+    "en": ("This analysis describes how the trained model uses the input variables "
+           "(model behaviour), not a physical causal conclusion."),
+}
+
+
+def model_behaviour_note(lang="zh"):
+    """SHAP / 特征重要性图注与 Analysis.md 的统一免责声明（要求 D）。"""
+    return _MODEL_BEHAVIOUR_NOTE.get(lang, _MODEL_BEHAVIOUR_NOTE["zh"])
+
+
+def unit_from_header(name):
+    """从数据列名末尾的括号中提取物理单位（要求 C）。
+
+    文献表常把单位写进列名（如「粒子温度(°C)」「粒子速度(m/s)」「孔隙率(%)」）。
+    仅当最后一个括号内的内容看起来像单位（≤12 字符，且由 °/字母/%/μ/·/斜杠/
+    上标/数字组成、不是纯数字）时返回；否则返回 ""。
+    """
+    import re
+    groups = re.findall(r"[（(]([^()（）]+)[)）]", str(name))
+    if not groups:
+        return ""
+    cand = groups[-1].strip()
+    if not cand or len(cand) > 12:
+        return ""
+    if not re.fullmatch(r"[°*a-zA-Zμ%/·⁻²³0-9.\-]+", cand):
+        return ""
+    if re.fullmatch(r"[\d.\-]+", cand):
+        return ""
+    if cand.lower() in ("c", "°c", "℃"):
+        return "°C"
+    return cand
+
+
+def cv_display_method(method_str, batch_count=None, lang="zh"):
+    """把 chain_cv.method 的真实方法字符串转为用户可读显示文案。
+
+    - "GroupKFold(...)"（确实执行了分组切分）→ 「分组交叉验证（折外预测）」
+    - "LOOCV (...)"                          → 「留一法交叉验证（折外预测）」
+    - "KFold(n_splits=5, shuffle)"           → 「随机五折交叉验证（折外预测）」
+    - method_str 缺失时按 batch_count 兜底：无批次 → 随机五折；有批次 → 分组。
+
+    只改显示文字，不修改内部字段、数据与训练逻辑。
+    """
+    s = str(method_str or "").lower()
+    if "loocv" in s or "leaveoneout" in s:
+        return ("留一法交叉验证（折外预测）" if lang == "zh"
+                else "Leave-one-out CV (out-of-fold predictions)")
+    if "groupkfold" in s:
+        return ("分组交叉验证（折外预测）" if lang == "zh"
+                else "Grouped CV (out-of-fold predictions)")
+    if "kfold" in s:
+        return ("随机五折交叉验证（折外预测）" if lang == "zh"
+                else "Randomized 5-fold CV (out-of-fold predictions)")
+    try:
+        n_batches = int(batch_count) if batch_count is not None else 0
+    except (TypeError, ValueError):
+        n_batches = 0
+    if n_batches == 0:
+        return ("随机五折交叉验证（折外预测）" if lang == "zh"
+                else "Randomized 5-fold CV (out-of-fold predictions)")
+    return ("分组交叉验证（折外预测）" if lang == "zh"
+            else "Grouped CV (out-of-fold predictions)")
+
+
+def stage_scope_label(trained_stages, lang="zh"):
+    """按实际训练成功的层级生成预测范围标注。
+
+    - 只训练了 Stage 1（可选 Stage 1.5）→ 「Stage 1 过程预测（折外验证）」
+    - Stage 3 也训练成功                  → 才允许写「全链」
+    - 只有 Stage 1–2                      → 「Stage 1–2 过程—缺陷预测（折外验证）」
+    """
+    stages = {str(s) for s in (trained_stages or [])}
+    if not stages:
+        return ("模型预测（折外验证）" if lang == "zh"
+                else "Model prediction (out-of-fold validated)")
+    if stages <= {"stage1", "stage15"}:
+        return ("Stage 1 过程预测（折外验证）" if lang == "zh"
+                else "Stage 1 process prediction (out-of-fold validated)")
+    if "stage3" in stages:
+        return ("全链预测（Stage 1→2→3，折外验证）" if lang == "zh"
+                else "Full-chain prediction (Stage 1→2→3, out-of-fold validated)")
+    return ("Stage 1–2 过程—缺陷预测（折外验证）" if lang == "zh"
+            else "Stage 1–2 process–defect prediction (out-of-fold validated)")

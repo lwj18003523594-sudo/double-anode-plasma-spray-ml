@@ -8,6 +8,7 @@ import pandas as pd
 import yaml
 
 from .config import ROOT
+from .paper_labels import unit_from_header
 
 # 文献数据中常见的熔融字段别名（仅用于"建议映射"，最终由用户确认）
 MELTING_ALIAS_SUGGESTIONS = {
@@ -106,13 +107,18 @@ def build_runtime_schema(df, selection):
             schema["process_inputs"][col] = _spec_for(col)
     for col in selection.get("states", []):
         if col in df.columns:
-            schema["process_states"][col] = {"unit": "-", "required": False}
+            # V1.8.1：单位尽量从列名括号中提取（如 粒子温度(°C) → °C），供
+            # Parity/Residual 图 y 轴与统计框使用；提取失败保持 "-"。
+            schema["process_states"][col] = {"unit": unit_from_header(col) or "-",
+                                             "required": False}
     for col in selection.get("defects", []):
         if col in df.columns:
-            schema["defect_network"][col] = {"unit": "-", "required": False}
+            schema["defect_network"][col] = {"unit": unit_from_header(col) or "-",
+                                             "required": False}
     for col in selection.get("performance", []):
         if col in df.columns:
-            schema["performance_outputs"][col] = {"unit": "-", "required": False}
+            schema["performance_outputs"][col] = {"unit": unit_from_header(col) or "-",
+                                                  "required": False}
     # 熔融层：用户确认映射后写入 melting_states
     schema["melting_states"] = {}
     for field, col in (selection.get("melting_map") or {}).items():

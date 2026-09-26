@@ -553,7 +553,11 @@ def _smart_run_analysis(file_obj):
         # 默认展示最近一次成功 run（已拍板决策 §八.3）
         st.session_state["smart_summary_run_id"] = ok_runs[-1]["run_id"]
         st.session_state["sum_run_pick"] = ok_runs[-1]["run_id"]
+        # V1.8.1（要求 F）：缓存键 = 文件哈希 + 本次 demo 勾选状态。
+        # 同一文件在 demo 勾选变化后必须重新分析生成新 run，不得返回旧结果。
         st.session_state["qa_last_analyzed_hash"] = st.session_state.get("qa_file_hash")
+        st.session_state["qa_last_analyzed_demo"] = bool(
+            st.session_state.get("qa_uploaded_demo", False))
         st.session_state["qa_last_analyzed_run_id"] = ok_runs[-1]["run_id"]
         if ok_runs[-1]["mode"] == MODE_ID:
             st.session_state["active_quick_run_id"] = ok_runs[-1]["run_id"]
@@ -794,9 +798,13 @@ with tab0:
         with c_ana:
             _pending_file = st.session_state.get("qa_file_cache")
             if _pending_file is not None:
+                # V1.8.1（要求 F）：命中缓存需同时满足 文件哈希一致 且 demo 勾选
+                # 状态与上次分析一致；demo 勾选变化 → 必须生成新 run 并选中。
                 already_analyzed = (st.session_state.get("qa_last_analyzed_run_id") and
                                     st.session_state.get("qa_last_analyzed_hash") ==
-                                    st.session_state.get("qa_file_hash"))
+                                    st.session_state.get("qa_file_hash") and
+                                    bool(st.session_state.get("qa_last_analyzed_demo", False)) ==
+                                    bool(st.session_state.get("qa_uploaded_demo", False)))
                 if already_analyzed:
                     if st.button("查看本次结果", type="primary", key="smart_analyze_btn"):
                         rid = st.session_state["qa_last_analyzed_run_id"]

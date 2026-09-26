@@ -28,7 +28,9 @@ from .features import add_physics_features
 from .model_chain import predict_chain, _XGB_HYPERPARAMS
 from .optimize import random_pareto_search
 from .paper_labels import (paper_label, axis_label, stage_paper_label,
-                           misc_label, target_slug)
+                           misc_label, target_slug, PAPER_LABELS,
+                           cv_display_method, stage_scope_label,
+                           model_behaviour_note, unit_from_header)
 from .paper_style import (apply_paper_style, save_figure,
                           fig_single, fig_double, fig_mid, add_stat_box)
 # V1.6（P0-5）：论文图与网页端同源色板——hex 只定义于 src/plot_style.py
@@ -109,6 +111,15 @@ class PaperExporter:
         self.cv = bundle.get("chain_cv") or {}
         self.metrics = self.cv.get("metrics") or {}
         self.oof = self.cv.get("oof_predictions") or {}
+        # V1.8.1：CV / 层级显示文案——一律由 helper 按实际执行方法与实际训练
+        # 层级生成，禁止在图题/图注/元数据中硬编码「全链分组交叉验证」。
+        self.batch_count = int(df["batch_id"].nunique()) if "batch_id" in df else None
+        self.cv_display = cv_display_method(self.cv.get("method"), self.batch_count, lang="zh")
+        self.cv_display_en = cv_display_method(self.cv.get("method"), self.batch_count, lang="en")
+        _trained_stages = [s for s in ["stage1", "stage15", "stage2", "stage3"]
+                           if self.bundle.get(f"{s}_models")]
+        self.stage_scope = stage_scope_label(_trained_stages, lang="zh")
+        self.stage_scope_en = stage_scope_label(_trained_stages, lang="en")
         # V1.4：文件名前缀可按研究模式指定（DEMO_/DUAL_/APS_/CASCADE_/LIT_）；
         # 不指定时保持 V1.3 行为（demo→DEMO_，否则无前缀），A–G 模块命名不受影响。
         self.demo_prefix = prefix if prefix is not None else ("DEMO_" if demo else "")
@@ -135,6 +146,40 @@ class PaperExporter:
         saved = save_figure(fig, stem, self.run_dir / "figures",
                             formats=self.formats, lang=self.lang, demo=self.demo)
         return saved, stem
+
+    # ---------- V1.8.1 显示层 helper（单位 / CV 文案，不改数据） ----------
+    def _unit_of(self, target):
+        """目标变量的显示单位：优先 schema 的 unit，其次 PAPER_LABELS 统一表，
+        最后从列名括号中提取（如「粒子温度(°C)」→ °C，要求 C）。"""
+        for sec in ("process_states", "defect_network", "performance_outputs",
+                    "melting_states"):
+            spec = (self.schema.get(sec) or {}).get(target)
+            if isinstance(spec, dict) and str(spec.get("unit") or "").strip() not in ("", "-"):
+                return str(spec["unit"]).strip()
+        info = PAPER_LABELS.get(target)
+        if info and str(info.get("unit") or "").strip() not in ("", "-"):
+            return str(info["unit"]).strip()
+        return unit_from_header(target)
+
+    def _axis_with_unit(self, key, target=None):
+        """轴标签带单位：如「预测值（℃）」；无单位时保持原标签。"""
+        base = axis_label(key, self.lang)
+        unit = self._unit_of(target) if target else ""
+        if not unit:
+            return base
+        return f"{base}（{unit}）" if self.lang == "zh" else f"{base} ({unit})"
+
+    def _fmt_metric(self, value, unit=None):
+        """统计框内指标值：RMSE/MAE 带单位（要求 C）。"""
+        s = f"{float(value):.3g}"
+        return f"{s} {unit}" if unit else s
+
+    def _cv_note(self, lang=None):
+        """图下方一行式验证说明（内容来自 helper，不压在数据区域）。"""
+        lang = lang or self.lang
+        scope = self.stage_scope if lang == "zh" else self.stage_scope_en
+        cv = self.cv_display if lang == "zh" else self.cv_display_en
+        return f"{scope} · {cv}"
 
     def _save_data(self, df_data, code, name=None):
         """绘图原始数据 CSV（保留完整精度）。"""
@@ -193,7 +238,10 @@ class PaperExporter:
             "model_version": manifest["model_version"],
             "target": target,
             "model_type": model_type,
-            "cv_method": self.cv.get("method", "none"),
+            # V1.8.1：元数据 cv_method 改为按实际执行方法生成的显示文案；
+            # 原始方法字符串保留在 cv_method_raw 以便程序化回溯。
+            "cv_method": self.cv_display if self.lang == "zh" else self.cv_display_en,
+            "cv_method_raw": self.cv.get("method", "none"),
             "sample_count": manifest["sample_count"],
             "batch_count": manifest["batch_count"],
             "R2": r2,
@@ -223,19 +271,21 @@ class PaperExporter:
         dtype_en = ("synthetic demo data (software testing only)" if self.demo else
                     "published literature data" if literature else "real experimental data")
         t = paper_label(target, lang) if target else ""
-        cv = self.cv.get("method") or ("未记录交叉验证方式" if lang == "zh" else
-                                        "cross-validation method unavailable")
+        # V1.8.1：CV 文案与层级标注一律来自 helper（实际执行方法 / 实际训练层级）
+        cv = self.cv_display if lang == "zh" else self.cv_display_en
+        scope = self.stage_scope if lang == "zh" else self.stage_scope_en
         if kind == "parity":
-            return (f"图为{t}的实验值与预测值对比。预测值来自{cv}的折外（OOF）预测；"
+            return (f"图为{t}的实验值与预测值对比。{scope}；预测值来自{cv}；"
                     f"模型类型：{model_type}；样本数 n={n}；数据类型：{dtype}。虚线为 y=x 参考线。"
                     if lang == "zh" else
-                    f"Experimental vs. predicted {t}. Predicted values are out-of-fold predictions from "
-                    f"{cv}; model: {model_type}; n={n}; data: {dtype_en}. Dashed line: y = x.")
+                    f"Experimental vs. predicted {t}. {scope}; predicted values are out-of-fold "
+                    f"predictions from {cv}; model: {model_type}; n={n}; data: {dtype_en}. "
+                    f"Dashed line: y = x.")
         if kind == "residual":
-            return (f"图为{t}的残差图（预测值 − 实验值），预测值来自{cv}。"
+            return (f"图为{t}的残差图（预测值 − 实验值）。{scope}；预测值来自{cv}。"
                     f"模型类型：{model_type}；数据类型：{dtype}。"
                     if lang == "zh" else
-                    f"Residuals (predicted − experimental) of {t} from {cv}; "
+                    f"Residuals (predicted − experimental) of {t}. {scope}; predictions from {cv}; "
                     f"model: {model_type}; data: {dtype_en}.")
         if kind == "overview":
             return (f"各级模型各预测目标在{cv}下的决定系数 R² 汇总（包含全部目标，未作筛选）。数据类型：{dtype}。"
@@ -244,12 +294,16 @@ class PaperExporter:
                     f"data: {dtype_en}.")
         if kind == "importance":
             return (f"图为{t}的 XGBoost 内置特征重要性（Top N）。模型训练采用{cv}。数据类型：{dtype}。"
+                    f"{model_behaviour_note(lang)}"
                     if lang == "zh" else
-                    f"XGBoost built-in feature importance for {t} (Top N); training used {cv}; data: {dtype_en}.")
+                    f"XGBoost built-in feature importance for {t} (Top N); training used {cv}; data: {dtype_en}. "
+                    f"{model_behaviour_note(lang)}")
         if kind == "shap":
             return (f"图为{t}的 SHAP 特征贡献分布（XGBoost）。数据类型：{dtype}。"
+                    f"{model_behaviour_note(lang)}"
                     if lang == "zh" else
-                    f"SHAP summary of feature contributions for {t} (XGBoost); data: {dtype_en}.")
+                    f"SHAP summary of feature contributions for {t} (XGBoost); data: {dtype_en}. "
+                    f"{model_behaviour_note(lang)}")
         if kind == "pdp":
             return (f"图为{t}对所选输入特征的部分依赖图（PDP），显示模型平均预测响应趋势，"
                     f"仅表征模型关联规律，不代表因果关系。数据类型：{dtype}。"
@@ -361,7 +415,9 @@ class PaperExporter:
             "python_version": _platform.python_version(),
             "package_versions": _version_info(),
             "random_seed": self.bundle.get("seed", 42),
-            "cv_method": self.cv.get("method", "none"),
+            # V1.8.1：cv_method 为显示文案；原始方法字符串另存 cv_method_raw
+            "cv_method": self.cv_display if self.lang == "zh" else self.cv_display_en,
+            "cv_method_raw": self.cv.get("method", "none"),
             "sample_count": int(len(df)),
             "batch_count": int(df["batch_id"].nunique()) if "batch_id" in df else None,
             "targets": {
@@ -387,7 +443,8 @@ class PaperExporter:
                  f"- 生成时间：{man['date']}",
                  f"- 数据版本：{man['dataset_version']}　模型版本：{man['model_version']}",
                  f"- 样本数：{man['sample_count']}　喷涂批次数：{man['batch_count'] if man['batch_count'] is not None else '未提供'}",
-                 f"- 交叉验证方法：{man['cv_method']}",
+                 f"- 交叉验证方法：{self.cv_display if self.lang == 'zh' else self.cv_display_en}"
+                 + (f"（{self.stage_scope}）" if self.lang == "zh" else f" ({self.stage_scope_en})"),
                  f"- 模式：{'DEMO 模拟数据（仅测试软件功能，不得用于科研结论）' if self.demo else '文献数据（不可直接验证双阳极性能）' if self.demo_prefix.startswith('QUICK_LIT_') else '真实实验数据'}",
                  "", "## 模型评价（折外交叉验证，非训练集拟合值）", ""]
         for stage in ["stage1", "stage2", "stage3"]:
@@ -545,7 +602,7 @@ class PaperExporter:
         oof = stage_oof.get(target) if stage_oof is not None else None
         if oof is None:
             raise PaperOutputError(
-                "当前模型缺少全链分组交叉验证的逐行 OOF 预测记录，请先重新训练模型（V1.2+ 版本）。")
+                "当前模型缺少交叉验证的逐行 OOF 预测记录，请先重新训练模型（V1.2+ 版本）。")
         pred = oof.dropna()
         actual = self.df.loc[pred.index, target]
         mask = actual.notna()
@@ -573,7 +630,7 @@ class PaperExporter:
                     "独立batch数" if self.lang == "zh" else "Batches":
                         int(self.df.loc[a.index, "batch_id"].nunique()) if "batch_id" in self.df else None,
                     "CV方法" if self.lang == "zh" else "CV method":
-                        "GroupKFold(batch_id)" if self.cv else "-",
+                        self.cv_display if self.lang == "zh" else self.cv_display_en,
                     "R²": round(float(met["R2"]), 4),
                     "RMSE": round(float(met["RMSE"]), 4),
                     "MAE": round(float(met["MAE"]), 4),
@@ -597,13 +654,17 @@ class PaperExporter:
         ax.set_xlim(lo - pad, hi + pad)
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_xlabel(axis_label("actual", self.lang))
-        ax.set_ylabel(axis_label("predicted", self.lang))
+        ax.set_ylabel(self._axis_with_unit("predicted", target))
         ax.set_title(f"{misc_label('title_parity', self.lang)} — {paper_label(target, self.lang)}",
                      fontsize=11.5)
-        cv_txt = self.cv.get("method") or "—"
-        stats_txt = f"R² = {r2:.3f}\nRMSE = {rmse:.3g}\nMAE = {mae:.3g}\nn = {len(actual)}\nCV: {cv_txt}"
-        add_stat_box(ax, stats_txt, loc="upper left")
-        fig.tight_layout()
+        # V1.8.1：统计框只保留 R²/RMSE/MAE/n 四行（RMSE/MAE 带单位）；CV 说明
+        # 改为一行短句放图下方（fig.supxlabel），不再压在数据区域。
+        unit = self._unit_of(target)
+        stats_txt = (f"R² = {r2:.3f}\nRMSE = {self._fmt_metric(rmse, unit)}\n"
+                     f"MAE = {self._fmt_metric(mae, unit)}\nn = {len(actual)}")
+        add_stat_box(ax, stats_txt, loc="upper left", fontsize=9)
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+        fig.supxlabel(self._cv_note(), fontsize=8.5, color=GRAY_MUTED)
         saved, stem = self._save_fig(fig, f"Fig_B{self._stage_bno(stage)}_{target_slug(target)}_Parity")
         code = f"Data_B{self._stage_bno(stage)}"
         stem_d = f"{self.demo_prefix}{code}_{target_slug(target)}_Parity"
@@ -632,7 +693,7 @@ class PaperExporter:
                            target=target,
                            n=int(len(actual)), r2=r2, rmse=rmse, mae=mae,
                            model_type=self._model_kind(stage, target),
-                           cv_method="分组交叉验证 OOF（折外预测）",
+                           cv_method=self._cv_note(),
                            trend_desc="散点围绕 y = x 参考线分布，反映折外预测与实验值的总体一致性。")
         return saved + [data, meta], stem
 
@@ -644,14 +705,18 @@ class PaperExporter:
         fig, ax = plt.subplots(figsize=fig_single(3.2))
         ax.axhline(0, linestyle="--", color=GRAY_REF, linewidth=1.0, zorder=1)
         ax.scatter(pred, resid, s=26, c=PINK_ACCENT, alpha=0.75, edgecolors="none", zorder=2)
-        ax.set_xlabel(axis_label("predicted", self.lang))
-        ax.set_ylabel(axis_label("residual", self.lang))
+        ax.set_xlabel(self._axis_with_unit("predicted", target))
+        ax.set_ylabel(self._axis_with_unit("residual", target))
         ax.set_title(f"{misc_label('title_residual', self.lang)} — {paper_label(target, self.lang)}",
                      fontsize=11.5)
-        cv_txt = self.cv.get("method") or "—"
-        add_stat_box(ax, f"RMSE = {rmse:.3g}\nMAE = {mae:.3g}\nn = {len(actual)}\nCV: {cv_txt}",
-                     loc="upper right")
-        fig.tight_layout()
+        # V1.8.1：统计框只保留 R²/RMSE/MAE/n 四行（RMSE/MAE 带单位）；CV 说明
+        # 改为一行短句放图下方（fig.supxlabel），不再压在数据区域。
+        unit = self._unit_of(target)
+        add_stat_box(ax, (f"R² = {r2:.3f}\nRMSE = {self._fmt_metric(rmse, unit)}\n"
+                          f"MAE = {self._fmt_metric(mae, unit)}\nn = {len(actual)}"),
+                     loc="upper right", fontsize=9)
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+        fig.supxlabel(self._cv_note(), fontsize=8.5, color=GRAY_MUTED)
         saved, stem = self._save_fig(fig, f"Fig_B{self._stage_bno(stage)}_{target_slug(target)}_Residual")
         stem_d = f"{self.demo_prefix}Data_B{self._stage_bno(stage)}_{target_slug(target)}_Residual"
         data = self.run_dir / "data" / f"{stem_d}.csv"
@@ -693,7 +758,10 @@ class PaperExporter:
         colors = [_stage_color[s] for s, _, _ in rows]
         ax.barh(names, vals, color=colors, alpha=0.88)
         ax.axvline(0, color=GRAY_REF, linewidth=0.8)
-        ax.set_xlabel(axis_label("R2overview", self.lang))
+        # V1.8.1：x 轴标注按实际 CV 方法动态生成（不再硬编码「全链分组交叉验证」）
+        ax.set_xlabel(f"{axis_label('R2overview', self.lang)}"
+                      f"（{self.cv_display}）" if self.lang == "zh" else
+                      f"{axis_label('R2overview', self.lang)} ({self.cv_display_en})")
         ax.set_xlim(min(0.0, min(vals) - 0.1), 1.05)
         for i, v in enumerate(vals):
             ax.text(v + (0.015 if v >= 0 else -0.015), i, f"{v:.3f}",
@@ -761,7 +829,9 @@ class PaperExporter:
                            target=target,
                            n=int(len(self.df)),
                            top_features=[paper_label(f, self.lang) for f in imp["feature"].tolist()[::-1]],
-                           model_type="XGBoost", cv_method="分组交叉验证训练的最终部署模型",
+                           model_type="XGBoost", cv_method=self.cv_display,
+                           # 要求 D：Analysis.md 注明模型行为描述，非物理因果结论
+                           extra_notes=[model_behaviour_note(self.lang)],
                            trend_desc="各输入变量的模型内置重要性存在明显层级差异。")
         return saved + [data, meta], stem
 
@@ -1385,7 +1455,7 @@ class PaperExporter:
         self._analysis_for("melting_perf", Path(saved[0]).stem, r2=_r2_first,
                            eid=_eid_h3,
                            n=int(len(self.df)), model_type="Stage 1.5 XGBoost",
-                           cv_method="分组交叉验证 OOF（连续目标 Parity / 分类目标混淆矩阵）",
+                           cv_method=self._cv_note(),
                            melting_from_model=True,
                            trend_desc="熔融状态模型的折外预测与实验/文献标签总体一致性见图；"
                                       "分类目标请同时参考平衡准确率。")

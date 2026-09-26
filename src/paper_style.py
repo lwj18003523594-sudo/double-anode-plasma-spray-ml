@@ -104,11 +104,11 @@ def apply_paper_style(lang="zh"):
         plt.rcParams["font.family"] = chain or ["DejaVu Sans"]
 
 
-def add_stat_box(ax, note: str, *, loc="upper left") -> None:
+def add_stat_box(ax, note: str, *, loc="upper left", fontsize: float = 8) -> None:
     """统一注脚框：parity/residual 的 n/R²/RMSE/CV 标注。
 
-    白底、GRAY_BORDER 边 0.6pt、GRAY_INK 字 8pt——直接标注替代角落图例
-    （P0-5 验收 2）。note 为空串时不绘制。
+    白底、GRAY_BORDER 边 0.6pt、GRAY_INK 字（默认 8pt）——直接标注替代角落图例
+    （P0-5 验收 2）。note 为空串时不绘制。fontsize 可按图类型覆盖（如 9）。
     """
     if not note:
         return
@@ -117,7 +117,7 @@ def add_stat_box(ax, note: str, *, loc="upper left") -> None:
            "lower left": (0.03, 0.03, "bottom", "left"),
            "lower right": (0.97, 0.03, "bottom", "right")}.get(loc, (0.03, 0.97, "top", "left"))
     ax.text(pos[0], pos[1], note, transform=ax.transAxes,
-            va=pos[2], ha=pos[3], fontsize=8, color=GRAY_INK,
+            va=pos[2], ha=pos[3], fontsize=fontsize, color=GRAY_INK,
             bbox=dict(boxstyle="round,pad=0.3", fc="white",
                       ec=GRAY_BORDER, lw=0.6, alpha=0.9))
 

@@ -24,6 +24,7 @@ from .config import ROOT
 from .modes import MODES, load_schema_for_mode, suggest_cv
 from .literature import build_runtime_schema, MELTING_ALIAS_SUGGESTIONS
 from .evidence import EvidenceRegistry
+from .paper_labels import cv_display_method, stage_scope_label, target_slug
 
 QUICK_ROOT = ROOT / "runs" / "quick_analysis"
 HISTORY_FILE = QUICK_ROOT / "run_history.json"
@@ -71,6 +72,51 @@ def load_quick_workspace(run_id):
 META_SHEET_KEYWORDS = ["readme", "source_metadata", "platform_field_mapping",
                        "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata",
                        "文献总览", "论文结果核对", "参考文献"]
+
+
+# ---------------- 逐行折外预测导出（要求 E） ----------------
+def export_stage1_oof_csv(results_dir, df, bundle, prefix="QUICK_LIT_"):
+    """为每个 Stage 1 目标导出逐行折外预测 CSV。
+
+    文件：results/data/<prefix>Data_OOF_<目标slug>.csv
+    列：row_index（0-based 原始行号）、fold（0–4，该行作为验证折的编号）、
+        actual、predicted、residual = predicted − actual。
+    数据全部来自 run_quick_analysis 训练时的 KFold / GroupKFold / LOOCV 切分
+    （bundle["chain_cv"]["oof_predictions"] 与 ["oof_row_records"]），不做任何
+    二次预测；actual 缺失的行不导出。返回写入的文件路径列表。
+    """
+    cv = bundle.get("chain_cv") or {}
+    oof_all = cv.get("oof_predictions")
+    stage1_oof = oof_all.get("stage1") if isinstance(oof_all, dict) else None
+    if stage1_oof is None or len(stage1_oof) == 0:
+        return []
+    folds = cv.get("oof_row_records")
+    if folds is None:
+        return []
+    data_dir = Path(results_dir) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    row_pos = {idx: i for i, idx in enumerate(df.index)}
+    written = []
+    for target, pred in stage1_oof.items():
+        if target not in df.columns:
+            continue
+        pred_v = pred.dropna()
+        rows = []
+        for idx, pv in pred_v.items():
+            actual = pd.to_numeric(df.loc[idx, target], errors="coerce")
+            fold = folds.loc[idx] if idx in folds.index else np.nan
+            if pd.isna(actual) or pd.isna(pv) or pd.isna(fold):
+                continue
+            rows.append({"row_index": row_pos[idx], "fold": int(fold),
+                         "actual": float(actual), "predicted": float(pv),
+                         "residual": float(pv) - float(actual)})
+        if not rows:
+            continue
+        out = data_dir / f"{prefix}Data_OOF_{target_slug(target)}.csv"
+        pd.DataFrame(rows).sort_values("row_index").to_csv(
+            out, index=False, encoding="utf-8-sig")
+        written.append(out)
+    return written
 
 # 通用别名（字段名 → 规范字段），仅用于高置信度自动映射
 GENERIC_ALIAS = {
@@ -417,6 +463,16 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         return _finish(run_id, mode_id, steps, bundle, schema, {}, sheet_name, demo,
                        failed=True)
 
+    # V1.8.1：结果文件名前缀统一计算一次（与 PaperExporter 的 _package 一致）
+    prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
+
+    # V1.8.1（要求 E）：逐行折外预测导出——每个 Stage 1 目标一份 OOF CSV
+    # （row_index / fold / actual / predicted / residual），失败不阻断主流程。
+    def _export_oof():
+        return {"oof_csv": [str(p) for p in
+                            export_stage1_oof_csv(results_dir, df, bundle, prefix)]}
+    oof_export = step("逐行折外预测导出", _export_oof)
+
     # ⑥ 模型解释 + 熔融状态（信息汇总）
     def _explain():
         factors, stability = insight_mod.model_key_factors(bundle)
@@ -492,7 +548,7 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
             manifest_path = None
 
     def _package():
-        prefix = "QUICK_" + MODES[mode_id]["prefix"].get("literature", "LIT_")
+        # V1.8.1：prefix 已在上方统一计算（含 OOF CSV 导出），不再重复生成。
         # V1.6 fix（QA 回归问题 1）：registry 传入 PaperExporter——
         # 否则 build_bundle 模块 I 会以 registry=None 重新生成洞察报告，
         # 覆盖 _insights() 的证据化版本，且 fig.* 证据不注册。
@@ -517,7 +573,8 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
 
     return _finish(run_id, mode_id, steps, bundle, schema,
                    {"explain": explain, "insight": insight_out, "package": pkg,
-                    "pareto": pareto_result, "warnings": (check or {}).get("warning", [])},
+                    "oof_export": oof_export, "pareto": pareto_result,
+                    "warnings": (check or {}).get("warning", [])},
                    sheet_name, demo, failed=pkg is None,
                    manifest_path=manifest_path, summary_path=summary_path)
 
@@ -575,11 +632,13 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
     metrics = cv.get("metrics") or {}
     oof = cv.get("oof_predictions") or {}
     cv_method = cv.get("method")
+    # V1.8.1：结论句中的 CV 文案改为按实际执行方法生成的显示文案
+    batches = int(df["batch_id"].nunique()) if (df is not None and "batch_id" in df.columns) else None
+    cv_method_display = cv_display_method(cv_method, batches)
     data_version = ("auto_" + str(bundle.get("dataset_hash"))[:8]) \
         if bundle.get("dataset_hash") else None
     model_version = bundle.get("model_version")
     n = int(len(df)) if df is not None else None
-    batches = int(df["batch_id"].nunique()) if (df is not None and "batch_id" in df.columns) else None
 
     # 各 Stage 目标指标（真实计算值；n 取 OOF 有效样本数）
     def _oof_n(oof_all, stage, t):
@@ -684,7 +743,7 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
                 "在当前模型中（CV: {cv_method}），对 {target} 影响最大的变量为 "
                 "{feature}（重要性 {imp:.3f}）。",
                 source_class="model", computed_by="insights.model_key_factors",
-                values={"cv_method": cv_method or "未记录", "target": t0_name,
+                values={"cv_method": cv_method_display, "target": t0_name,
                         "feature": f0["feature"], "imp": f0["importance"]},
                 required=("feature", "imp", "cv_method"))
             conclusions.append({"eid": "qa.top_feature", "text": txt,
@@ -695,7 +754,7 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
                 "在当前模型与约束下（CV: {cv_method}），共搜索到 {n_pareto} 个 Pareto "
                 "非支配方案（候选 {n_candidates}，满足约束 {n_feasible}）。",
                 source_class="model", computed_by="optimize.random_pareto_search",
-                values={"cv_method": cv_method or "未记录",
+                values={"cv_method": cv_method_display,
                         "n_pareto": int(pareto_stats["n_pareto"]),
                         "n_candidates": int(pareto_stats.get("n_candidates", 0)),
                         "n_feasible": int(pareto_stats.get("n_feasible", 0))},
@@ -711,7 +770,12 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
         "demo": bool(demo),
         "date": datetime.now().isoformat(timespec="seconds"),
         "header": {"n": n, "batches": batches, "data_version": data_version,
-                   "model_version": model_version, "cv_method": cv_method,
+                   "model_version": model_version,
+                   "cv_method": cv_method,
+                   "cv_method_display": cv_method_display,
+                   "stage_scope": stage_scope_label(
+                       [s for s in ["stage1", "stage15", "stage2", "stage3"]
+                        if bundle.get(f"{s}_models")]),
                    "stage15": bool(bundle.get("stage15_enabled"))},
         "stages": stages,
         "top_features": top_features,
@@ -736,6 +800,21 @@ def load_smart_summary(run_id):
         return None
 
 
+def _unique_run_id(base):
+    """生成不与历史/现存目录冲突的 run_id。
+
+    同一秒内连续两次分析（如同一文件在 demo 勾选变化后再次运行）不得复用
+    同一 run 目录互相覆盖——要求 F 的前提保障。
+    """
+    rid = base
+    n = 2
+    existing = {str(r.get("run_id")) for r in load_history()}
+    while (QUICK_ROOT / rid).exists() or rid in existing:
+        rid = f"{base}_{n}"
+        n += 1
+    return rid
+
+
 def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=False,
                        confirm_maps=None):
     """对整个 Excel/CSV 执行快速分析：多数据 Sheet → 多个独立 Run（绝不合并）。"""
@@ -755,7 +834,7 @@ def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=Fal
     results = []
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     for i, (sn, df) in enumerate(sheets.items()):
-        rid = f"{run_prefix or 'QA'}_{ts}_{i+1:02d}"
+        rid = _unique_run_id(f"{run_prefix or 'QA'}_{ts}_{i+1:02d}")
         confirm = dict((confirm_maps or {}).get(sn) or {})
         original_columns = {str(c).lower(): c for c in df.columns}
         sheet_directions = {original_columns[k.lower()]: v for k, v in directions.items()

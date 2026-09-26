@@ -21,6 +21,7 @@ from xgboost import XGBRegressor, XGBClassifier
 
 from .features import add_physics_features
 from .research_utils import training_domain, save_domain_files
+from .paper_labels import cv_display_method
 
 def _metrics(y, pred):
     return {
@@ -28,6 +29,19 @@ def _metrics(y, pred):
         "RMSE": float(mean_squared_error(y, pred) ** 0.5),
         "MAE": float(mean_absolute_error(y, pred)),
     }
+
+
+def _dependency_versions():
+    """依赖版本记录（写入 latest_manifest.json，供复现实验环境）。"""
+    import platform as _pl
+    out = {"python": _pl.python_version()}
+    for mod, key in [("sklearn", "scikit-learn"), ("xgboost", "xgboost"),
+                     ("pandas", "pandas"), ("numpy", "numpy")]:
+        try:
+            out[key] = __import__(mod).__version__
+        except Exception:
+            out[key] = "unknown"
+    return out
 
 def _classif_metrics(y_true_codes, y_pred_codes):
     """分类目标（Stage 1.5）OOF 指标：不只报告 Accuracy，类别不平衡时看平衡准确率。"""
@@ -398,7 +412,8 @@ def cross_validate_chain(df, schema, seed=42, n_splits=None):
     defect_cols = groups_cfg["defect_network"]
     perf_cols = groups_cfg["performance_outputs"]
 
-    empty = {"method": "none", "metrics": {"stage1": {}, "stage2": {}, "stage3": {}}, "fold_info": []}
+    empty = {"method": "none", "metrics": {"stage1": {}, "stage2": {}, "stage3": {}},
+             "fold_info": [], "oof_row_records": None}
     if len(df) == 0:
         return empty
     has_batch = "batch_id" in df.columns
@@ -437,10 +452,14 @@ def cross_validate_chain(df, schema, seed=42, n_splits=None):
         "stage3": {t: pd.Series(np.nan, index=df.index) for t in perf_cols},
     }
     fold_info = []
+    # V1.8.1：每行样本作为验证折时的折编号（0-based，与 df 行位置对应）。
+    # 无批次 KFold / LOOCV 路径同样记录，供逐行折外预测导出（OOF CSV）使用。
+    row_fold = pd.Series(np.nan, index=df.index, dtype="float64")
 
     for k, (tr_idx, va_idx) in enumerate(splits):
         tr_df = df.iloc[tr_idx]
         va_df = df.iloc[va_idx]
+        row_fold.iloc[va_idx] = k
 
         # 防泄漏硬校验：同一 batch 不得同时出现在训练/验证集（仅分组模式）
         if use_grouped:
@@ -492,6 +511,9 @@ def cross_validate_chain(df, schema, seed=42, n_splits=None):
             "n_val": int(len(va_idx)),
             "train_batches": sorted(tr_batches),
             "val_batches": sorted(va_batches),
+            # 0-based 原始行号（位置索引）：无批次 KFold/LOOCV 时 val_batches 为空，
+            # manifest 与逐行折外预测导出改用本字段回溯折划分。
+            "val_row_index": [int(i) for i in va_idx],
             "stage1_fi_top": fi_top,
         })
 
@@ -546,6 +568,9 @@ def cross_validate_chain(df, schema, seed=42, n_splits=None):
         # 每行样本的外层验证预测（仅验证批次有值），供论文评价图使用；
         # 同一 batch 绝不跨训练/验证，故这些预测均来自未见过该批次的模型。
         "oof_predictions": oof_predictions,
+        # 每行样本作为验证折时的折编号（0-based）；用于逐行折外预测导出与
+        # manifest 中的折划分索引回溯。
+        "oof_row_records": row_fold,
     }
 
 
@@ -579,6 +604,7 @@ def train_chain_full(df, schema, model_path, seed=42, n_splits=None):
     save_domain_files(domain, Path(model_path))
     schema_str = json.dumps(schema, sort_keys=True, ensure_ascii=False)
     schema_version = "v1_" + hashlib.sha256(schema_str.encode("utf-8")).hexdigest()[:8]
+    manifest_batch_count = int(df["batch_id"].nunique()) if "batch_id" in df.columns else None
 
     manifest = {
         "model_version": model_version,
@@ -587,7 +613,8 @@ def train_chain_full(df, schema, model_path, seed=42, n_splits=None):
         "dataset_version": "auto_" + dataset_hash[:8],
         "dataset_hash": dataset_hash,
         "schema_version": schema_version,
-        "batch_count": int(df["batch_id"].nunique()) if "batch_id" in df.columns else None,
+        "batch_count": manifest_batch_count,
+        "package_versions": _dependency_versions(),
         "sample_count": int(len(df)),
         "feature_list": {
             "stage1": bundle["stage1_features"],
@@ -600,8 +627,11 @@ def train_chain_full(df, schema, model_path, seed=42, n_splits=None):
             "stage3": list(bundle["stage3_models"].keys()),
         },
         "cross_validation_method": cv["method"],
+        # 用户可读 CV 文案（按实际执行方法生成，见 paper_labels.cv_display_method）
+        "cross_validation_display": cv_display_method(cv["method"], manifest_batch_count),
         "fold_groups": [
-            {"fold": fi["fold"], "val_batches": fi["val_batches"]}
+            {"fold": fi["fold"], "val_batches": fi["val_batches"],
+             "val_row_index": fi.get("val_row_index", [])}
             for fi in cv["fold_info"]
         ],
         "model_hyperparameters": {
