@@ -96,6 +96,9 @@ def export_stage1_oof_csv(results_dir, df, bundle, prefix="QUICK_LIT_"):
     data_dir = Path(results_dir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     row_pos = {idx: i for i, idx in enumerate(df.index)}
+    # 源记录标识：原始"喷涂序号"等贯穿导出，绝不与内部 0 基索引混淆。
+    from .paper_labels import find_source_id_column
+    id_col, id_quality = find_source_id_column(df)
     written = []
     for target, pred in stage1_oof.items():
         if target not in df.columns:
@@ -107,9 +110,14 @@ def export_stage1_oof_csv(results_dir, df, bundle, prefix="QUICK_LIT_"):
             fold = folds.loc[idx] if idx in folds.index else np.nan
             if pd.isna(actual) or pd.isna(pv) or pd.isna(fold):
                 continue
-            rows.append({"row_index": row_pos[idx], "fold": int(fold),
-                         "actual": float(actual), "predicted": float(pv),
-                         "residual": float(pv) - float(actual)})
+            row = {"row_index": row_pos[idx],
+                   "source_row_no": row_pos[idx] + 1}
+            if id_col is not None:
+                row["source_experiment_no"] = df.loc[idx, id_col]
+            row.update({"fold": int(fold), "actual": float(actual),
+                        "predicted": float(pv),
+                        "residual": float(pv) - float(actual)})
+            rows.append(row)
         if not rows:
             continue
         out = data_dir / f"{prefix}Data_OOF_{target_slug(target)}.csv"
@@ -412,6 +420,8 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     # ② 数据准备检查
     mode_id, scores = detect_mode(df)
     sel, ambiguous = infer_field_map(df)
+    _field_map_record = {"selected": {k: list(v) for k, v in sel.items()},
+                         "ambiguous": list(ambiguous) if ambiguous else []}
     if confirm_map:  # 用户确认歧义字段：{col: "x"/"performance"/"material"/"ignore"}
         for col, role in confirm_map.items():
             if role in ("x", "performance", "material", "defects", "states") and col in df.columns:
@@ -443,7 +453,22 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     def _train():
         p = run_dir / "model.joblib"
         b = train_chain_full(df, schema, p, n_splits=None)
+        b["field_map"] = _field_map_record
         bundle.update(b)
+        # 复现清单补全：字段映射 + 关键程序文件哈希写入 run 的 manifest
+        import hashlib as _hl
+        mp = run_dir / "latest_manifest.json"
+        try:
+            _m = json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else {}
+            _m["field_map"] = _field_map_record
+            _m["file_hashes"] = {
+                f: _hl.sha256((ROOT / f).read_bytes()).hexdigest()[:16]
+                for f in ["app.py", "src/quick_analysis.py", "src/model_chain.py",
+                          "src/paper_output.py", "src/features.py", "src/figure_analysis.py"]
+                if (ROOT / f).exists()}
+            mp.write_text(json.dumps(_m, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as _e:
+            log_event("manifest_patch_error", f"{run_id}: {_e}")
         # V1.6：训练成功后回填证据注册表的版本信息（meta 类溯源字段）
         registry.model_version = b.get("model_version")
         registry.data_version = ("auto_" + str(b.get("dataset_hash"))[:8]) \
@@ -728,7 +753,7 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
                 values={"stage_label": _STAGE_LABEL_SMART.get(stage, stage),
                         "target": r0["target"], "r2": r0["R2"], "rmse": r0["RMSE"],
                         "n": r0["n"] if r0["n"] is not None else n or 0,
-                        "cv_method": cv_method or "未记录"},
+                        "cv_method": cv_method_display or "未记录"},
                 required=("r2", "rmse", "n", "cv_method"))
             conclusions.append({"eid": eid, "text": txt, "source_class": "model"})
         if top_features:

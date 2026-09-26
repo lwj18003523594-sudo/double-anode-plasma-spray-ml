@@ -78,7 +78,10 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
                    sample_warning=None, extrapolation=False, melting_from_model=False,
                    has_microstructure=False, literature_refs=None, model_type="XGBoost",
                    cv_method=None, extra_notes=None,
-                   eid=None, registry=None):
+                   eid=None, registry=None,
+                   no_batch_id=False, process_only=False,
+                   no_external_test=True, en_target=None, en_trend=None,
+                   id_note=None):
     """生成 8 段式科研解读（纯文本模板 + 调用方传入的真实统计量）。
 
     所有数值必须由调用方从真实数据/模型计算后传入；本函数绝不编造数字。
@@ -105,25 +108,34 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
     sections.append(("一、现象描述", s1))
 
     # ② 数据证据
-    ev = []
+    # 证据分级：原始测量/样本量=直接观测；CV 指标=模型验证结果（模型推断）。
+    # 同一段落混用两类证据时分别标注来源，不得笼统写"直接数据"。
+    ev_direct = []
     if n is not None:
-        ev.append(f"样本数 n={n}")
+        ev_direct.append(f"样本数 n={n}")
     if batch_count is not None:
-        ev.append(f"独立批次 {batch_count} 个")
-    if r2 is not None:
-        ev.append(f"R²={_fmt(r2)}")
-    if rmse is not None:
-        ev.append(f"RMSE={_fmt(rmse)}")
-    if mae is not None:
-        ev.append(f"MAE={_fmt(mae)}")
+        ev_direct.append(f"独立批次 {batch_count} 个")
     if pearson is not None:
-        ev.append(f"Pearson r={_fmt(pearson)}")
+        ev_direct.append(f"Pearson r={_fmt(pearson)}")
     if spearman is not None:
-        ev.append(f"Spearman ρ={_fmt(spearman)}")
+        ev_direct.append(f"Spearman ρ={_fmt(spearman)}")
+    ev_model = []
+    if r2 is not None:
+        ev_model.append(f"R²={_fmt(r2)}")
+    if rmse is not None:
+        ev_model.append(f"RMSE={_fmt(rmse)}")
+    if mae is not None:
+        ev_model.append(f"MAE={_fmt(mae)}")
     if pareto_count is not None:
-        ev.append(f"Pareto 非支配解 {pareto_count} 个")
-    s2 = (TAG_DATA + " " + "，".join(ev) + "。" if ev
-          else TAG_DATA + " 当前未提供汇总统计量，请结合原始数据表核对。")
+        ev_model.append(f"Pareto 非支配解 {pareto_count} 个")
+    parts2 = []
+    if ev_direct:
+        parts2.append(TAG_DATA + " " + "，".join(ev_direct) + "。")
+    if ev_model:
+        parts2.append(TAG_MODEL + "（模型验证结果，非原始测量）"
+                      + "，".join(ev_model) + "。")
+    s2 = " ".join(parts2) if parts2 \
+        else TAG_DATA + " 当前未提供汇总统计量，请结合原始数据表核对。"
     if cv_method:
         s2 += f" 评价方式：{cv_method}（折外预测，非训练集拟合值）。"
     sections.append(("二、数据证据", s2))
@@ -157,10 +169,19 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
               f"仅可推测该趋势可能与粒子热历史及熔融沉积过程有关（推测），仍需进一步验证。")
     sections.append(("四、可能物理机理", s4))
 
-    # ⑤ 当前局限性
+    # ⑤ 当前局限性：固有局限（数据/验证设计决定）必须如实列出，
+    # 禁止输出"未检测到明显局限性因素"。
     lims = []
     if demo:
         lims.append("**当前为模拟演示数据，全部结果仅用于软件功能验证，不可用于正式科研结论**")
+    if no_batch_id:
+        lims.append("数据未提供独立喷涂批次标识：仅能使用随机 KFold 内部交叉验证，"
+                    "无法进行按批次分组验证，折间信息泄漏风险无法用分组方式排除")
+    if process_only:
+        lims.append("仅训练并验证了过程预测层（Stage 1）；"
+                    "涂层缺陷与性能层因缺少实测目标未训练，不能给出涂层级结论")
+    if no_external_test:
+        lims.append("仅有内部交叉验证结果，无独立外部测试集")
     if n is not None and n < 10:
         lims.append(f"样本量极少（n={n}），结果仅适合功能测试或探索性分析")
     elif n is not None and n <= 25:
@@ -175,12 +196,16 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
         lims.append(f"交叉验证 R²={_fmt(r2)}，模型预测能力有限，请谨慎解读")
     if sample_warning:
         lims.append(sample_warning)
-    s5 = (TAG_TODO + " " + ("；".join(lims) + "。") if lims
-          else TAG_TODO + " 当前未检测到明显局限性因素。")
+    if id_note:
+        lims.append(id_note)
+    if not lims:
+        lims.append("仅有内部交叉验证结果，无独立外部测试集")
+    s5 = TAG_TODO + " " + "；".join(lims) + "。"
     sections.append(("五、当前局限性", s5))
 
     # ⑥ 中文论文表述草稿
-    zh_stat = "；".join(ev[:6]) if ev else ""
+    ev_all = ev_direct + ev_model
+    zh_stat = "；".join(ev_all[:6]) if ev_all else ""
     zh_draft = (f"图 X 展示了{zh_t}的结果。{phen}"
                 + (f"（{zh_stat}）" if zh_stat else "")
                 + " 结果基于" + ("模拟演示数据（仅软件功能验证）。" if demo else "当前实验/文献数据。")
@@ -188,21 +213,43 @@ def analyze_figure(kind, *, target=None, stage=None, n=None, batch_count=None,
                   "受样本量与数据覆盖限制，机理层面的解释仍需进一步实验验证。")
     sections.append(("六、中文论文表述草稿", zh_draft))
 
-    # ⑦ English manuscript draft
-    en_draft = (
-        f"Figure X presents the results for {zh_t}. {phen} "
-        + (f"({zh_stat}). " if zh_stat else "")
-        + ("Data are synthetic demo values for software validation only. " if demo else
-           "Data are from the current experimental/literature dataset. ")
-        + "Within the current model, the observed trend reflects a statistical association "
-          "between input variables and the output; mechanistic interpretation requires "
-          "further experimental verification.")
+    # ⑦ English manuscript draft：必须为可用英文。
+    # 中文现象描述无法可靠翻译时，改用结构性英文统计句 + 明确的"待人工核对"标记，
+    # 严禁把中文句子混入英文稿后仍称为可用草稿。
+    def _has_cjk(text):
+        return any("\u4e00" <= ch <= "\u9fff" for ch in str(text))
+
+    en_t = en_target if en_target and not _has_cjk(en_target) else None
+    en_phen = en_trend if en_trend and not _has_cjk(en_trend) else None
+    en_stat = []
+    if n is not None:
+        en_stat.append(f"n={n}")
+    if r2 is not None:
+        en_stat.append(f"R2={_fmt(r2)}")
+    if rmse is not None:
+        en_stat.append(f"RMSE={_fmt(rmse)}")
+    if mae is not None:
+        en_stat.append(f"MAE={_fmt(mae)}")
+    cv_en = "five-fold random cross-validation (out-of-fold predictions)"
+    data_en = ("synthetic demo values for software validation only" if demo
+               else "the current experimental/literature dataset")
+    en_core = (f"Figure X presents the results for {en_t or 'the target variable'}. "
+               + (f"{en_phen} " if en_phen else "")
+               + (f"Statistics ({', '.join(en_stat)}; {cv_en}). " if en_stat else "")
+               + f"Data are from {data_en}. "
+               + "The observed trend reflects a statistical association within the current model; "
+                 "mechanistic interpretation requires further experimental verification.")
+    if en_t is None or en_phen is None:
+        en_core += (" [英文稿待人工核对：目标名称/现象描述暂无法可靠翻译，"
+                    "上句结构已给出，请人工补全后再使用。]") if _has_cjk(zh_t) else ""
+    en_draft = en_core
     sections.append(("七、English manuscript draft", en_draft))
 
     # ⑧ 简洁结论
     strength = "探索性" if (demo or (n is not None and n <= 25) or (r2 is not None and r2 < 0.3)) \
         else "有一定数据与模型支持"
-    s8 = (f"{TAG_DATA} 综合而言，{zh_t}的图中规律为{strength}结果：{phen} "
+    s8 = ((TAG_MODEL if r2 is not None else TAG_DATA)
+          + f" 综合而言，{zh_t}的图中规律为{strength}结果：{phen} "
           f"该描述不构成因果结论，也不代表最优工艺选择。")
     sections.append(("八、简洁结论", s8))
 

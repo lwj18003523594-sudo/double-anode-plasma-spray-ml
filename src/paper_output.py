@@ -219,7 +219,27 @@ class PaperExporter:
         """
         try:
             from .figure_analysis import analyze_figure
+            from .paper_labels import find_source_id_column
             kw.setdefault("demo", self.demo)
+            # 固有局限如实注入（调用方未显式提供时）：
+            bc = (self.reproducibility_manifest() or {}).get("batch_count")
+            kw.setdefault("no_batch_id", bc in (None, 0))
+            kw.setdefault("process_only", not self.bundle.get("stage3_models"))
+            kw.setdefault("no_external_test", True)  # 平台当前仅内部交叉验证
+            _target_in_kw = kw.get("target")
+            if kind in ("parity", "residual") and _target_in_kw:
+                _idc, _idq = find_source_id_column(self.df)
+                if _idc is not None:
+                    _q = {"unique": "原始序号唯一且无缺失，已作为 source_experiment_no 列随结果导出",
+                          "duplicated": "原始序号存在重复值，已原样保留（未改写），请人工核对记录对应关系",
+                          "missing": "原始序号存在缺失值，已原样保留（未改写），请人工核对记录对应关系"}
+                    kw.setdefault("id_note", f"源记录标识列「{_idc}」：{_q.get(_idq, '已保留')}")
+                else:
+                    kw.setdefault("id_note", "数据表未提供原始实验编号列，结果仅附 1 基源表行号 source_row_no")
+            if kind in ("parity", "residual"):
+                kw.setdefault("en_target",
+                              paper_label(_target_in_kw, "en", with_unit=False)
+                              if _target_in_kw else None)
             if self.registry is not None and eid:
                 kw["eid"] = eid
                 kw["registry"] = self.registry
@@ -427,6 +447,13 @@ class PaperExporter:
                 s: self.bundle.get(f"{s}_features", [])
                 for s in ["stage1", "stage2", "stage3"]},
             "demo_data": self.demo,
+            # V1.8.1 复现清单补充：字段映射与关键程序文件哈希（SHA-256 前 16 位）
+            "field_map": self.bundle.get("field_map"),
+            "file_hashes": {f: hashlib.sha256((ROOT / f).read_bytes()).hexdigest()[:16]
+                            for f in ["app.py", "src/quick_analysis.py",
+                                      "src/model_chain.py", "src/paper_output.py",
+                                      "src/features.py"]
+                            if (ROOT / f).exists()},
         }
         return self._manifest
 
@@ -507,6 +534,12 @@ class PaperExporter:
         for sec, (zh_sec, en_sec) in SCHEMA_SECTIONS.items():
             for col, spec in self.schema.get(sec, {}).items():
                 s = pd.to_numeric(self.df[col], errors="coerce") if col in self.df else None
+                # 列不在数据表中时如实标注"未提供/不可统计"，
+                # 严禁把总行数冒充为该列的有效数据数量。
+                if s is None:
+                    n_valid, n_missing = "未提供", "不可统计"
+                else:
+                    n_valid, n_missing = int(s.notna().sum()), int(s.isna().sum())
                 rows.append({
                     "变量层级": zh_sec if self.lang == "zh" else en_sec,
                     "内部变量名": col,
@@ -517,8 +550,8 @@ class PaperExporter:
                             else ("中间量" if sec == "process_states" else "输出"),
                     "是否模型输入": "是" if sec in ("structure_inputs", "process_inputs") else "否",
                     "是否模型输出": "是" if sec in ("process_states", "defect_network", "performance_outputs") else "否",
-                    "数据数量": int(len(self.df)) if s is None else int(s.notna().sum()),
-                    "缺失数量": 0 if s is None else int(s.isna().sum()),
+                    "数据数量": n_valid,
+                    "缺失数量": n_missing,
                 })
         df_t = pd.DataFrame(rows)
         note = "DEMO SYNTHETIC DATA — FOR SOFTWARE TESTING ONLY" if self.demo else None
@@ -669,8 +702,13 @@ class PaperExporter:
         code = f"Data_B{self._stage_bno(stage)}"
         stem_d = f"{self.demo_prefix}{code}_{target_slug(target)}_Parity"
         data = self.run_dir / "data" / f"{stem_d}.csv"
+        # 源记录标识：experiment_id 必须是原始表中的实验/喷涂序号（非 0 基索引）。
+        from .paper_labels import find_source_id_column
+        id_col, _idq = find_source_id_column(self.df)
         df_data = pd.DataFrame({
-            "experiment_id": self.df.loc[actual.index, "experiment_id"].values if "experiment_id" in self.df else np.array(actual.index),
+            "source_row_no": [int(i) + 1 for i in actual.index],
+            "experiment_id": (self.df.loc[actual.index, id_col].values
+                              if id_col is not None else ""),
             "batch_id": self.df.loc[actual.index, "batch_id"].values if "batch_id" in self.df else "",
             "target": target,
             "actual": actual.values,
@@ -698,6 +736,8 @@ class PaperExporter:
         return saved + [data, meta], stem
 
     def fig_residual(self, stage, target):
+        from .paper_labels import find_source_id_column
+        id_col, _idq = find_source_id_column(self.df)
         actual, pred = self._oof_series(stage, target)
         resid = pred - actual
         r2, rmse, mae = self._stats_of(stage, target)
@@ -721,7 +761,8 @@ class PaperExporter:
         stem_d = f"{self.demo_prefix}Data_B{self._stage_bno(stage)}_{target_slug(target)}_Residual"
         data = self.run_dir / "data" / f"{stem_d}.csv"
         df_data = pd.DataFrame({
-            "experiment_id": self.df.loc[actual.index, "experiment_id"].values if "experiment_id" in self.df else np.array(actual.index),
+            "source_row_no": [int(i) + 1 for i in actual.index],
+            "experiment_id": (self.df.loc[actual.index, id_col].values if id_col is not None else ""),
             "batch_id": self.df.loc[actual.index, "batch_id"].values if "batch_id" in self.df else "",
             "target": target,
             "actual": actual.values,

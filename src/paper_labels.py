@@ -63,6 +63,27 @@ PAPER_LABELS = {
     "particle_flight_time_ms_proxy": {"zh": "粒子飞行时间代理量", "en": "Particle flight time proxy", "unit": "ms", "abbr": "t.flight"},
 }
 
+# 源记录标识列：只用于定位原始记录，绝不能进入模型输入。
+# 命中这些列名（小写比较）的列将作为 source_experiment_no 贯穿 OOF/Parity/证据表。
+IDENTIFIER_COLUMNS = {"喷涂序号", "spray_run_id", "experiment_id", "batch_id",
+                      "sample_id", "试样编号", "实验编号"}
+
+
+def find_source_id_column(df):
+    """返回 (列名, 质量)；质量: unique(唯一且无缺失) / duplicated(有重复) / missing(缺失)。
+    df 无标识列时返回 (None, None)。不改写原值。"""
+    import pandas as pd
+    for col in df.columns:
+        if str(col).strip().lower() in IDENTIFIER_COLUMNS:
+            s = df[col]
+            if s.isna().any():
+                return col, "missing"
+            if s.duplicated().any():
+                return col, "duplicated"
+            return col, "unique"
+    return None, None
+
+
 STAGE_LABELS_PAPER = {
     "stage1": {"zh": "一级模型", "en": "Stage 1 model"},
     "stage2": {"zh": "二级模型", "en": "Stage 2 model"},
