@@ -138,6 +138,11 @@ def target_slug(name, lang="en"):
     """用于文件名的目标短名，如 porosity_pct -> Porosity。"""
     info = PAPER_LABELS.get(name)
     if info is None:
-        return name
+        # Literature headers may contain '/', degree signs, parentheses or path
+        # separators. Keep readable Unicode while preventing nested/invalid paths.
+        import hashlib
+        import re
+        slug = re.sub(r"[^\w]+", "_", str(name), flags=re.UNICODE).strip("_")[:70]
+        return slug or "field_" + hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:8]
     base = info["abbr"] if lang == "zh" else info["en"]
     return "".join(ch for ch in base if ch.isalnum())

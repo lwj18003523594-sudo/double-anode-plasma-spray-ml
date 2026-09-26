@@ -28,7 +28,8 @@ HISTORY_FILE = QUICK_ROOT / "run_history.json"
 SUMMARY_NAME = "summary.json"
 
 META_SHEET_KEYWORDS = ["readme", "source_metadata", "platform_field_mapping",
-                       "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata"]
+                       "platform_test_plan", "使用说明", "说明", "字典", "字段", "metadata",
+                       "文献总览", "论文结果核对", "参考文献"]
 
 # 通用别名（字段名 → 规范字段），仅用于高置信度自动映射
 GENERIC_ALIAS = {
@@ -39,6 +40,18 @@ GENERIC_ALIAS = {
     "porosity": "porosity_pct", "bond_strength": "bond_strength_MPa",
     "hardness": "hardness_HV",
 }
+
+# Published APS process data: retain the original headers and units. Pressure in psi
+# must never be silently interpreted as a gas flow in slpm. An experiment number is
+# an identifier, not a tunable process variable.
+LITERATURE_ROLE_ALIASES = {
+    "ar压力(psi)": "x", "h2压力(psi)": "x",
+    "ar_pressure_psi": "x", "h2_pressure_psi": "x",
+    "电流(a)": "x", "喷距(mm)": "x", "stand_off_distance_mm": "x",
+    "粒子温度(°c)": "states", "粒子速度(m/s)": "states",
+    "particle_temperature_c": "states", "particle_velocity_m_s": "states",
+}
+IDENTIFIER_COLUMNS = {"喷涂序号", "spray_run_id", "experiment_id", "batch_id"}
 
 ROLE_SECTIONS = {
     "structure_inputs": "structure_inputs",
@@ -104,21 +117,25 @@ def data_readiness_issues(df, schema):
         targets += [c for c in (schema.get(sec) or {}) if c in df.columns]
     usable = 0
     for t in targets:
-        s = pd.to_numeric(df[t], errors="coerce") if not hasattr(df[t], "dtype") or \
-            pd.api.types.is_numeric_dtype(df[t]) else None
-        if s is None or s.notna().sum() < 10:
+        s = pd.to_numeric(df[t], errors="coerce")
+        # train_chain requires >=20 measured target values; preflight must use
+        # the same threshold so it never announces a trainable but empty model.
+        if s.notna().sum() < 20:
             continue
         usable += 1
         if s.nunique() <= 1:
             warning.append(f"目标 {t} 为常数（无预测价值）")
     if usable == 0:
-        crit = "未找到任何可训练目标（目标列缺失 / 非数值 / 有效值不足 10 条）"
+        crit = "未找到任何可训练目标（目标列缺失、非数值或有效值不足 20 条）"
         critical.append(crit)
 
     ins = [c for c in (schema.get("structure_inputs") or {}) if c in df.columns] + \
           [c for c in (schema.get("process_inputs") or {}) if c in df.columns]
     if not ins:
         critical.append("未找到任何输入变量 X")
+    elif not any(pd.to_numeric(df[c], errors="coerce").notna().sum() >= 20
+                 and pd.to_numeric(df[c], errors="coerce").nunique() > 1 for c in ins):
+        critical.append("输入变量 X 均缺少足够的有效数值或没有变化")
     for c in ins:
         s = pd.to_numeric(df[c], errors="coerce")
         if s.isna().mean() > 0.6:
@@ -176,14 +193,20 @@ def infer_field_map(df):
     高置信度（列名与规范字段精确一致，或命中别名表）→ 自动；
     其余数值列 → 歧义（可能为 X / Y / 材料），交由用户确认。
     """
-    canon = _all_canonical_fields()
-    low = {str(c).lower().strip(): c for c in df.columns}
+    canon = {c.lower(): info for c, info in _all_canonical_fields().items()}
     sel = {"x": [], "states": [], "defects": [], "performance": [],
            "material": [], "melting_map": {}}
     ambiguous = {}
     used = set()
     for col in df.columns:
         key = str(col).lower().strip()
+        if key in IDENTIFIER_COLUMNS:
+            used.add(col)
+            continue
+        if key in LITERATURE_ROLE_ALIASES:
+            sel[LITERATURE_ROLE_ALIASES[key]].append(col)
+            used.add(col)
+            continue
         if key in canon:
             role = canon[key]["role"]
             target = {"structure_inputs": "x", "process_inputs": "x",
@@ -204,8 +227,8 @@ def infer_field_map(df):
         if alias and alias in df.columns:
             used.add(col)
             continue
-        if alias and alias in canon:
-            role = canon[alias]["role"]
+        if alias and alias.lower() in canon:
+            role = canon[alias.lower()]["role"]
             if role == "melting_states":
                 sel["melting_map"][alias] = col
             else:
@@ -323,8 +346,10 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
 
     check = step("数据读取与检查", lambda: None)  # ①
     check = step("数据准备检查", _build_schema)
-    if schema is None:
-        return _finish(run_id, mode_id, steps, None, None, {}, sheet_name, demo, failed=True)
+    if check is None:
+        return _finish(run_id, mode_id, steps, None, schema,
+                       {"warnings": [], "unmapped_columns": list(ambiguous)},
+                       sheet_name, demo, failed=True)
 
     # ④ 训练（Quick Run 模型目录，不覆盖正式模型）
     bundle = {}
@@ -359,11 +384,14 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     directions = confirm_map.get("_directions") if isinstance(confirm_map, dict) else None
     objectives = {c: d for c, d in (directions or {}).items()
                   if d in ("maximize", "minimize")
-                  and c in (schema.get("performance_outputs") or schema.get("defect_network") or {})}
-    if not objectives:
+                  and (c in bundle.get("stage3_models", {}) or
+                       c in bundle.get("stage2_models", {}))}
+    if not bundle.get("stage3_models") or len(objectives) < 2:
         # 默认全部 prediction_only：跳过 Pareto（spec 二十九）
         step("多目标优化（Pareto）", lambda: None, skippable=True,
-             skip_reason="当前数据未定义优化目标方向（prediction_only），未执行自动多目标优化")
+             skip_reason=("缺少可训练的涂层性能目标；当前数据仅能验证过程层，无法计算涂层性能 Pareto 前沿"
+                          if not bundle.get("stage3_models") else
+                          "未定义至少两个已训练的涂层缺陷/性能目标的优化方向（prediction_only），未执行多目标优化"))
     else:
         def _pareto():
             from .optimize import random_pareto_search
@@ -424,7 +452,8 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         # 覆盖 _insights() 的证据化版本，且 fig.* 证据不注册。
         ex = PaperExporter(df, schema, bundle, lang="zh", formats=("png",),
                            demo=demo, prefix=prefix, run_dir=results_dir,
-                           registry=registry)
+                           registry=registry,
+                           objective_cfg={"objectives": objectives, "constraints": {}})
         run_d, zip_p, paths = ex.build_bundle(n_candidates=800)
         return {"run_dir": str(run_d), "zip": str(zip_p),
                 "figures": len(paths.get("figures", [])),
@@ -443,7 +472,8 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
     return _finish(run_id, mode_id, steps, bundle, schema,
                    {"explain": explain, "insight": insight_out, "package": pkg,
                     "pareto": pareto_result, "warnings": (check or {}).get("warning", [])},
-                   sheet_name, demo, manifest_path=manifest_path, summary_path=summary_path)
+                   sheet_name, demo, failed=pkg is None,
+                   manifest_path=manifest_path, summary_path=summary_path)
 
 
 def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo,
@@ -566,13 +596,17 @@ def build_smart_summary(bundle, schema, extras=None, *, demo=False, run_id=None,
     conclusions = []
     if registry is not None:
         if n is not None:
+            batch_text = ("本次分析共读取 {n} 条记录、{batches} 个独立喷涂批次"
+                          "（数据版本 {data_version}）。" if batches is not None else
+                          "本次分析共读取 {n} 条记录，未提供独立喷涂批次标识"
+                          "（数据版本 {data_version}）。")
             txt = registry.statement(
                 "qa.n_samples",
-                "本次分析共读取 {n} 条记录、{batches} 个独立喷涂批次（数据版本 {data_version}）。",
+                batch_text,
                 source_class="direct", computed_by="quick_analysis.run_quick_analysis",
-                values={"n": n, "batches": batches if batches is not None else 0,
+                values={"n": n, "batches": batches,
                         "data_version": data_version or "未知"},
-                required=("n", "batches"))
+                required=("n", "batches") if batches is not None else ("n", "data_version"))
             conclusions.append({"eid": "qa.n_samples", "text": txt,
                                 "source_class": "direct"})
         for stage in ["stage1", "stage2", "stage3"]:
@@ -656,7 +690,8 @@ def load_smart_summary(run_id):
         return None
 
 
-def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=False):
+def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=False,
+                       confirm_maps=None):
     """对整个 Excel/CSV 执行快速分析：多数据 Sheet → 多个独立 Run（绝不合并）。"""
     from .literature import list_sheets, load_sheet
     name = str(getattr(file_or_path, "name", file_or_path)).lower()
@@ -675,7 +710,11 @@ def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=Fal
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     for i, (sn, df) in enumerate(sheets.items()):
         rid = f"{run_prefix or 'QA'}_{ts}_{i+1:02d}"
-        confirm = {"_directions": directions} if directions else None
+        confirm = dict((confirm_maps or {}).get(sn) or {})
+        original_columns = {str(c).lower(): c for c in df.columns}
+        sheet_directions = {original_columns[k.lower()]: v for k, v in directions.items()
+                            if k.lower() in original_columns}
+        confirm["_directions"] = {**sheet_directions, **(confirm.get("_directions") or {})}
         res = run_quick_analysis(df, sheet_name=sn, run_id=rid,
                                  confirm_map=confirm, progress_cb=progress_cb, demo=demo)
         results.append(res)

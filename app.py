@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+import hashlib
 import joblib
 import numpy as np
 import pandas as pd
@@ -462,7 +463,9 @@ def _smart_run_analysis(file_obj):
             st.session_state["smart_step"] = {"step": step_no, "state": "running", "msg": name}
 
     try:
-        results = qa.quick_analyze_file(file_obj, progress_cb=_cb, demo=use_demo)
+        results = qa.quick_analyze_file(file_obj, progress_cb=_cb,
+                                        demo=st.session_state.get("qa_uploaded_demo", False),
+                                        confirm_maps=st.session_state.get("qa_confirm_maps"))
     except Exception as e:
         st.session_state["smart_step"] = {"step": 2, "state": "fail",
                                           "msg": friendly_error(e)}
@@ -736,6 +739,12 @@ with tab0:
             qa_file = st.file_uploader("将 Excel / CSV 拖到这里（支持 XLSX、XLS、CSV）",
                                        type=["xlsx", "xls", "csv"], key="qa_uploader")
             if qa_file is not None:
+                st.checkbox("上传文件为模拟演示数据", value=False, key="qa_uploaded_demo",
+                            help="仅模拟数据勾选；文献实测数据不应继承首页演示模式。")
+                file_hash = hashlib.sha256(qa_file.getvalue()).hexdigest()
+                if st.session_state.get("qa_file_hash") != file_hash:
+                    st.session_state["qa_file_hash"] = file_hash
+                    st.session_state["qa_confirm_maps"] = {}
                 st.session_state["qa_file_cache"] = qa_file
                 try:
                     qa_sheets = list_sheets(qa_file)
@@ -743,6 +752,37 @@ with tab0:
                     st.info(f"识别到 {len(qa_data_sheets)} 个数据工作表（已跳过说明/元数据表："
                             f"{'、'.join(qa_meta_sheets) or '无'}），每个将独立运行；"
                             "数据安全检查未通过时会明确拦截并说明原因。")
+                    confirmed = {}
+                    role_choices = {"忽略": "ignore", "工艺输入 X": "x",
+                                    "过程状态 Y": "states", "涂层缺陷 Y": "defects",
+                                    "涂层性能 Y": "performance", "材料属性": "material"}
+                    with st.expander("确认未识别字段与涂层性能优化方向", expanded=False):
+                        for sheet in qa_data_sheets:
+                            frame = load_sheet(qa_file, sheet)
+                            selected, ambiguous = qa.infer_field_map(frame)
+                            st.markdown(f"**{sheet}**：输入 {selected['x']}；过程目标 {selected['states']}；"
+                                        f"涂层性能 {selected['performance']}")
+                            mapping = {}
+                            for col in ambiguous:
+                                key = hashlib.sha256(f"{file_hash}/{sheet}/{col}".encode()).hexdigest()[:16]
+                                label = st.selectbox(f"字段「{col}」的角色", list(role_choices),
+                                                     key=f"qa_role_{key}")
+                                mapping[col] = role_choices[label]
+                            perf = list(selected["defects"]) + list(selected["performance"]) + [
+                                c for c, role in mapping.items() if role in ("defects", "performance")]
+                            orientations = {}
+                            for col in perf:
+                                key = hashlib.sha256(f"{file_hash}/{sheet}/{col}/goal".encode()).hexdigest()[:16]
+                                label = st.selectbox(f"涂层缺陷/性能「{col}」的优化方向",
+                                                     ["仅预测", "最大化", "最小化"],
+                                                     key=f"qa_goal_{key}")
+                                orientations[col] = {"仅预测": "prediction_only",
+                                                     "最大化": "maximize", "最小化": "minimize"}[label]
+                            mapping["_directions"] = orientations
+                            confirmed[sheet] = mapping
+                        st.caption("多目标优化至少需要两个已训练的缺陷/性能目标，且有涂层性能预测层；"
+                                   "Ar/H₂ 压力（psi）按压力输入，不会按气体流量处理。")
+                    st.session_state["qa_confirm_maps"] = confirmed
                 except Exception as e:
                     st.error(f"文件读取失败：{friendly_error(e)}")
         elif st.session_state.get("qa_file_cache") is not None:
