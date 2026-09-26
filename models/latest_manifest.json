@@ -1,0 +1,258 @@
+{
+  "model_version": "v20260925_220500",
+  "training_time": "2026-09-25T22:05:00",
+  "random_seed": 42,
+  "dataset_version": "auto_ae43c77d",
+  "dataset_hash": "ae43c77daec66be8cc99ae37309f64bb87be021f5469ef8aaacb3289eb7c671e",
+  "schema_version": "v1_19fec921",
+  "batch_count": 28,
+  "sample_count": 280,
+  "feature_list": {
+    "stage1": [
+      "nozzle_throat_mm",
+      "nozzle_exit_mm",
+      "secondary_laval_length_mm",
+      "anode_spacing_mm",
+      "powder_injection_angle_deg",
+      "anode1_current_A",
+      "anode2_current_A",
+      "Ar_flow_slpm",
+      "H2_flow_slpm",
+      "powder_feed_g_min",
+      "spray_distance_mm",
+      "traverse_speed_mm_s",
+      "total_current_A",
+      "current_difference_A",
+      "current_imbalance_ratio",
+      "total_gas_flow_slpm",
+      "H2_Ar_ratio"
+    ],
+    "stage2": [
+      "nozzle_throat_mm",
+      "nozzle_exit_mm",
+      "secondary_laval_length_mm",
+      "anode_spacing_mm",
+      "powder_injection_angle_deg",
+      "anode1_current_A",
+      "anode2_current_A",
+      "Ar_flow_slpm",
+      "H2_flow_slpm",
+      "powder_feed_g_min",
+      "spray_distance_mm",
+      "traverse_speed_mm_s",
+      "total_current_A",
+      "current_difference_A",
+      "current_imbalance_ratio",
+      "total_gas_flow_slpm",
+      "H2_Ar_ratio",
+      "pred_arc_voltage_V",
+      "pred_jet_temperature_K",
+      "pred_jet_velocity_m_s",
+      "pred_particle_temperature_C",
+      "pred_particle_velocity_m_s"
+    ],
+    "stage3": [
+      "nozzle_throat_mm",
+      "nozzle_exit_mm",
+      "secondary_laval_length_mm",
+      "anode_spacing_mm",
+      "powder_injection_angle_deg",
+      "anode1_current_A",
+      "anode2_current_A",
+      "Ar_flow_slpm",
+      "H2_flow_slpm",
+      "powder_feed_g_min",
+      "spray_distance_mm",
+      "traverse_speed_mm_s",
+      "total_current_A",
+      "current_difference_A",
+      "current_imbalance_ratio",
+      "total_gas_flow_slpm",
+      "H2_Ar_ratio",
+      "pred_arc_voltage_V",
+      "pred_jet_temperature_K",
+      "pred_jet_velocity_m_s",
+      "pred_particle_temperature_C",
+      "pred_particle_velocity_m_s",
+      "pred_porosity_pct",
+      "pred_lamellar_gap_pct",
+      "pred_unmelted_particle_pct",
+      "pred_crack_density_mm_mm2",
+      "pred_defect_connectivity_index"
+    ]
+  },
+  "target_list": {
+    "stage1": [
+      "arc_voltage_V",
+      "jet_temperature_K",
+      "jet_velocity_m_s",
+      "particle_temperature_C",
+      "particle_velocity_m_s"
+    ],
+    "stage2": [
+      "porosity_pct",
+      "lamellar_gap_pct",
+      "unmelted_particle_pct",
+      "crack_density_mm_mm2",
+      "defect_connectivity_index"
+    ],
+    "stage3": [
+      "bond_strength_MPa",
+      "hardness_HV",
+      "wear_rate_mg_m",
+      "corrosion_current_uA_cm2",
+      "cavitation_mass_loss_mg",
+      "coupled_damage_rate",
+      "deposition_efficiency_pct"
+    ]
+  },
+  "cross_validation_method": "GroupKFold(n_splits=5) by batch_id, full-chain (Stage1→2→3 retrained per fold)",
+  "fold_groups": [
+    {
+      "fold": 0,
+      "val_batches": [
+        "B03",
+        "B05",
+        "B06",
+        "B13",
+        "B20",
+        "B22"
+      ]
+    },
+    {
+      "fold": 1,
+      "val_batches": [
+        "B10",
+        "B14",
+        "B16",
+        "B17",
+        "B24",
+        "B27"
+      ]
+    },
+    {
+      "fold": 2,
+      "val_batches": [
+        "B04",
+        "B15",
+        "B21",
+        "B25",
+        "B28"
+      ]
+    },
+    {
+      "fold": 3,
+      "val_batches": [
+        "B08",
+        "B09",
+        "B11",
+        "B18",
+        "B19",
+        "B23"
+      ]
+    },
+    {
+      "fold": 4,
+      "val_batches": [
+        "B01",
+        "B02",
+        "B07",
+        "B12",
+        "B26"
+      ]
+    }
+  ],
+  "model_hyperparameters": {
+    "xgboost": {
+      "n_estimators": 350,
+      "max_depth": 4,
+      "learning_rate": 0.035,
+      "subsample": 0.85,
+      "colsample_bytree": 0.85,
+      "reg_lambda": 1.0,
+      "objective": "reg:squarederror"
+    },
+    "stage1_stage2_cv": "GroupKFold by batch_id (OOF); fallback KFold if <4 groups",
+    "stage3_small_data": "Pipeline(median imputer -> standard scaler -> GaussianProcess(Matern nu=1.5 + WhiteKernel, normalize_y))",
+    "stage3_large_data": "Pipeline(median imputer -> RandomForest(n_estimators=500, min_samples_leaf=2))"
+  },
+  "R2": {
+    "stage1": {
+      "arc_voltage_V": 0.2715,
+      "jet_temperature_K": 0.8282,
+      "jet_velocity_m_s": 0.8588,
+      "particle_temperature_C": 0.6556,
+      "particle_velocity_m_s": 0.7093
+    },
+    "stage2": {
+      "porosity_pct": 0.5594,
+      "lamellar_gap_pct": 0.4936,
+      "unmelted_particle_pct": 0.5119,
+      "crack_density_mm_mm2": -0.0795,
+      "defect_connectivity_index": 0.4339
+    },
+    "stage3": {
+      "bond_strength_MPa": 0.3635,
+      "hardness_HV": 0.3274,
+      "wear_rate_mg_m": 0.2473,
+      "corrosion_current_uA_cm2": 0.4861,
+      "cavitation_mass_loss_mg": 0.4349,
+      "coupled_damage_rate": 0.4445,
+      "deposition_efficiency_pct": 0.1185
+    }
+  },
+  "RMSE": {
+    "stage1": {
+      "arc_voltage_V": 2.2808,
+      "jet_temperature_K": 236.4525,
+      "jet_velocity_m_s": 25.3478,
+      "particle_temperature_C": 68.3394,
+      "particle_velocity_m_s": 14.9095
+    },
+    "stage2": {
+      "porosity_pct": 0.4684,
+      "lamellar_gap_pct": 0.3597,
+      "unmelted_particle_pct": 0.5092,
+      "crack_density_mm_mm2": 0.0658,
+      "defect_connectivity_index": 0.0377
+    },
+    "stage3": {
+      "bond_strength_MPa": 2.9712,
+      "hardness_HV": 22.6037,
+      "wear_rate_mg_m": 0.0519,
+      "corrosion_current_uA_cm2": 1.4585,
+      "cavitation_mass_loss_mg": 2.924,
+      "coupled_damage_rate": 0.0743,
+      "deposition_efficiency_pct": 2.8028
+    }
+  },
+  "MAE": {
+    "stage1": {
+      "arc_voltage_V": 1.8535,
+      "jet_temperature_K": 187.9249,
+      "jet_velocity_m_s": 20.61,
+      "particle_temperature_C": 55.4992,
+      "particle_velocity_m_s": 12.0583
+    },
+    "stage2": {
+      "porosity_pct": 0.3778,
+      "lamellar_gap_pct": 0.2949,
+      "unmelted_particle_pct": 0.4085,
+      "crack_density_mm_mm2": 0.0515,
+      "defect_connectivity_index": 0.0307
+    },
+    "stage3": {
+      "bond_strength_MPa": 2.4091,
+      "hardness_HV": 18.1471,
+      "wear_rate_mg_m": 0.041,
+      "corrosion_current_uA_cm2": 1.17,
+      "cavitation_mass_loss_mg": 2.2874,
+      "coupled_damage_rate": 0.0588,
+      "deposition_efficiency_pct": 2.2326
+    }
+  },
+  "role": {
+    "evaluation": "全链分组交叉验证（fold 内重新训练 Stage1→2→3，仅预测验证批次）",
+    "deployment": "使用全部数据训练的最终模型（latest_chain.joblib）"
+  }
+}

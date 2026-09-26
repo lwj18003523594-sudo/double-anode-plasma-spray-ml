@@ -1,0 +1,242 @@
+{
+  "generated_at": "2026-09-26T11:32:14",
+  "seed": 42,
+  "cv_method": "GroupKFold(n_splits=5) by batch_id, full-chain (Stage1→2→3 retrained per fold)",
+  "architectures": {
+    "direct": {
+      "desc": "直连基线（工艺→性能，无过程/缺陷中介）",
+      "metrics": {
+        "bond_strength_MPa": {
+          "R2": 0.3404681768322432,
+          "RMSE": 3.0244404639071494,
+          "MAE": 2.4764584984321214,
+          "n": 280
+        },
+        "hardness_HV": {
+          "R2": 0.31350795596595404,
+          "RMSE": 22.835697767471856,
+          "MAE": 18.380479420347463,
+          "n": 280
+        },
+        "wear_rate_mg_m": {
+          "R2": 0.2242297543525087,
+          "RMSE": 0.05264503651190289,
+          "MAE": 0.042473429557168825,
+          "n": 280
+        },
+        "corrosion_current_uA_cm2": {
+          "R2": 0.470255584829981,
+          "RMSE": 1.4808159218628003,
+          "MAE": 1.1892553517145574,
+          "n": 280
+        },
+        "cavitation_mass_loss_mg": {
+          "R2": 0.4300968357186947,
+          "RMSE": 2.9363959865819522,
+          "MAE": 2.2997343143328437,
+          "n": 280
+        },
+        "coupled_damage_rate": {
+          "R2": 0.43783973347674165,
+          "RMSE": 0.07471319502264571,
+          "MAE": 0.0601765424884062,
+          "n": 280
+        },
+        "deposition_efficiency_pct": {
+          "R2": 0.11244187812097073,
+          "RMSE": 2.812407536179865,
+          "MAE": 2.2346770556447884,
+          "n": 280
+        }
+      }
+    },
+    "two_layer": {
+      "desc": "双层主链（工艺→过程状态 OOF→性能，课题主线）",
+      "metrics": {
+        "bond_strength_MPa": {
+          "R2": 0.34106704944641053,
+          "RMSE": 3.0230670154569705,
+          "MAE": 2.4542249987269886,
+          "n": 280
+        },
+        "hardness_HV": {
+          "R2": 0.30786488148383917,
+          "RMSE": 22.92936222258303,
+          "MAE": 18.454021529760364,
+          "n": 280
+        },
+        "wear_rate_mg_m": {
+          "R2": 0.2614039552993902,
+          "RMSE": 0.0513682015390941,
+          "MAE": 0.04176025794739047,
+          "n": 280
+        },
+        "corrosion_current_uA_cm2": {
+          "R2": 0.4708708698926669,
+          "RMSE": 1.4799557064391464,
+          "MAE": 1.194903598420927,
+          "n": 280
+        },
+        "cavitation_mass_loss_mg": {
+          "R2": 0.4140625594980919,
+          "RMSE": 2.977417334334751,
+          "MAE": 2.316677511283205,
+          "n": 280
+        },
+        "coupled_damage_rate": {
+          "R2": 0.4396097564074558,
+          "RMSE": 0.07459548096784673,
+          "MAE": 0.05980940575286761,
+          "n": 280
+        },
+        "deposition_efficiency_pct": {
+          "R2": 0.0873662809896032,
+          "RMSE": 2.8518593774525183,
+          "MAE": 2.2703703244383857,
+          "n": 280
+        }
+      }
+    },
+    "three_chain": {
+      "desc": "缺陷增强链（工艺→过程→缺陷→性能，V1.7 三级链）",
+      "metrics": {
+        "bond_strength_MPa": {
+          "R2": 0.3634740303113472,
+          "RMSE": 2.9712228452871576,
+          "MAE": 2.4090659864971533,
+          "n": 280
+        },
+        "hardness_HV": {
+          "R2": 0.3273877785413276,
+          "RMSE": 22.60366745584515,
+          "MAE": 18.147081903358142,
+          "n": 280
+        },
+        "wear_rate_mg_m": {
+          "R2": 0.24732913991283045,
+          "RMSE": 0.05185533249346502,
+          "MAE": 0.04102044841273635,
+          "n": 280
+        },
+        "corrosion_current_uA_cm2": {
+          "R2": 0.4860927647913573,
+          "RMSE": 1.4585128103599179,
+          "MAE": 1.169980178334118,
+          "n": 280
+        },
+        "cavitation_mass_loss_mg": {
+          "R2": 0.4348996291285152,
+          "RMSE": 2.9239967381734617,
+          "MAE": 2.287370778937146,
+          "n": 280
+        },
+        "coupled_damage_rate": {
+          "R2": 0.4445115707500418,
+          "RMSE": 0.07426851567501366,
+          "MAE": 0.0588208764620368,
+          "n": 280
+        },
+        "deposition_efficiency_pct": {
+          "R2": 0.11849750162890182,
+          "RMSE": 2.8027968809287076,
+          "MAE": 2.232580660127428,
+          "n": 280
+        }
+      }
+    }
+  },
+  "comparison": {
+    "bond_strength_MPa": {
+      "direct": 0.3405,
+      "direct_rmse": 3.0244,
+      "two_layer": 0.3411,
+      "two_layer_rmse": 3.0231,
+      "three_chain": 0.3635,
+      "three_chain_rmse": 2.9712,
+      "two_layer_gain": 0.0006,
+      "defect_gain": 0.0224,
+      "winner": "three_chain"
+    },
+    "cavitation_mass_loss_mg": {
+      "direct": 0.4301,
+      "direct_rmse": 2.9364,
+      "two_layer": 0.4141,
+      "two_layer_rmse": 2.9774,
+      "three_chain": 0.4349,
+      "three_chain_rmse": 2.924,
+      "two_layer_gain": -0.016,
+      "defect_gain": 0.0208,
+      "winner": "three_chain"
+    },
+    "corrosion_current_uA_cm2": {
+      "direct": 0.4703,
+      "direct_rmse": 1.4808,
+      "two_layer": 0.4709,
+      "two_layer_rmse": 1.48,
+      "three_chain": 0.4861,
+      "three_chain_rmse": 1.4585,
+      "two_layer_gain": 0.0006,
+      "defect_gain": 0.0152,
+      "winner": "three_chain"
+    },
+    "coupled_damage_rate": {
+      "direct": 0.4378,
+      "direct_rmse": 0.0747,
+      "two_layer": 0.4396,
+      "two_layer_rmse": 0.0746,
+      "three_chain": 0.4445,
+      "three_chain_rmse": 0.0743,
+      "two_layer_gain": 0.0018,
+      "defect_gain": 0.0049,
+      "winner": "three_chain"
+    },
+    "deposition_efficiency_pct": {
+      "direct": 0.1124,
+      "direct_rmse": 2.8124,
+      "two_layer": 0.0874,
+      "two_layer_rmse": 2.8519,
+      "three_chain": 0.1185,
+      "three_chain_rmse": 2.8028,
+      "two_layer_gain": -0.025,
+      "defect_gain": 0.0311,
+      "winner": "three_chain"
+    },
+    "hardness_HV": {
+      "direct": 0.3135,
+      "direct_rmse": 22.8357,
+      "two_layer": 0.3079,
+      "two_layer_rmse": 22.9294,
+      "three_chain": 0.3274,
+      "three_chain_rmse": 22.6037,
+      "two_layer_gain": -0.0056,
+      "defect_gain": 0.0195,
+      "winner": "three_chain"
+    },
+    "wear_rate_mg_m": {
+      "direct": 0.2242,
+      "direct_rmse": 0.0526,
+      "two_layer": 0.2614,
+      "two_layer_rmse": 0.0514,
+      "three_chain": 0.2473,
+      "three_chain_rmse": 0.0519,
+      "two_layer_gain": 0.0372,
+      "defect_gain": -0.0141,
+      "winner": "two_layer"
+    }
+  },
+  "wins": {
+    "direct": 0,
+    "two_layer": 1,
+    "three_chain": 6
+  },
+  "n_compared": 7,
+  "promote": "defect_enhanced",
+  "promote_text": "缺陷增强链在多数性能目标上稳定优于双层（3/7 目标 R² 增益 >0.02，胜 6 目标）——满足晋级条件，可作为正式预测路径。",
+  "selection_caveat": "本对照分数为模型选型证据（同轮比较），非无偏最终性能；最终性能以晋级架构的独立验证为准。",
+  "binding": {
+    "model_version": null,
+    "dataset_hash": null,
+    "bound_at": "2026-09-26T11:32:14",
+    "note": "架构对照（选型证据）"
+  }
+}

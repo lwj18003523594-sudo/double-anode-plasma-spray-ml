@@ -53,7 +53,21 @@ outputs/*
 runs/
 
 # ---- 模型产物（训练生成，体积大且随测试变化；由源码+数据可复现）----
-models/
+# V1.8 起入库例外：当前部署模型 + 校准因子 + 域文件（共 ~10MB，供直接复用/复现）；
+# models/history（过程版本快照，372MB）仍不入库。
+models/*
+!models/latest_chain.joblib
+!models/latest_manifest.json
+!models/training_domain.json
+!models/calibration.json
+
+# ---- 运行产物：L1-L4 验证结果例外（json+md 共 ~550KB，核心验证证据）----
+!outputs/calibration/
+!outputs/validation/
+!outputs/benchmark/
+!outputs/physics/
+!outputs/architecture/
+!outputs/reports/核心价值验证报告.md
 
 # ---- 用户上传的真实 / 文献数据（科研数据不进版本库；Demo 与模板除外）----
 data/user/

@@ -1,0 +1,70 @@
+{
+  "generated_at": "2026-09-26T07:42:10",
+  "method": "带 σ 全链交叉验证（fold0(n_val=58)；fold1(n_val=57)；fold2(n_val=54)；…）；折划分规则与平台全链 CV 一致（batch 分组 GroupKFold / LOOCV / KFold）",
+  "seed": 42,
+  "targets": {
+    "bond_strength_MPa": {
+      "n": 280,
+      "cov_1sigma": 0.6964,
+      "cov_2sigma": 0.9536,
+      "z_var": 0.99,
+      "factor": 0.995,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.8047
+    },
+    "hardness_HV": {
+      "n": 280,
+      "cov_1sigma": 0.6893,
+      "cov_2sigma": 0.9643,
+      "z_var": 0.9609,
+      "factor": 0.9803,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.7855
+    },
+    "wear_rate_mg_m": {
+      "n": 280,
+      "cov_1sigma": 0.6857,
+      "cov_2sigma": 0.9357,
+      "z_var": 1.0614,
+      "factor": 1.0303,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.8154
+    },
+    "corrosion_current_uA_cm2": {
+      "n": 280,
+      "cov_1sigma": 0.7107,
+      "cov_2sigma": 0.9536,
+      "z_var": 0.9755,
+      "factor": 0.9877,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.7901
+    },
+    "cavitation_mass_loss_mg": {
+      "n": 280,
+      "cov_1sigma": 0.7036,
+      "cov_2sigma": 0.9536,
+      "z_var": 0.968,
+      "factor": 0.9839,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.7673
+    },
+    "coupled_damage_rate": {
+      "n": 280,
+      "cov_1sigma": 0.675,
+      "cov_2sigma": 0.9571,
+      "z_var": 1.0343,
+      "factor": 1.017,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.8017
+    },
+    "deposition_efficiency_pct": {
+      "n": 280,
+      "cov_1sigma": 0.6786,
+      "cov_2sigma": 0.95,
+      "z_var": 0.9818,
+      "factor": 0.9909,
+      "verdict": "校准良好",
+      "mean_abs_z": 0.789
+    }
+  }
+}
