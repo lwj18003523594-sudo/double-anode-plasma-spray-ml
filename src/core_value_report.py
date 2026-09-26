@@ -36,72 +36,106 @@ def _load_json(path):
         return None
 
 
-def _layer_verdicts(mode_label, demo=False):
-    """逐层判定：返回 {layer: {done, passed, detail}}。"""
+def _layer_verdicts(mode_label, demo=False, current_model_version=None,
+                   current_dataset_hash=None):
+    """逐层判定：返回 {layer: {done, passed, fresh, detail}}。
+
+    V1.8（方案 §3）：L1→L4 是四个**独立证据维度**（校准 / 覆盖 / 效率 / 合理性），
+    不是逐级闯关——每层独立判定，不要求顺序依赖。
+    V1.8（方案 §10）：结果不绑定当前模型/数据 → fresh=False，不得算作当前通过。
+    """
     out = {}
 
     # ---- L1 校准 ----
+    from .calibration import calibration_status
+    cal_st = calibration_status(current_model_version, current_dataset_hash)
     cal = _load_json(ROOT / "models" / "calibration.json")
-    if cal and (cal.get("targets") or {}):
+    if cal_st.get("done") and (cal.get("targets") or {}):
         tg = {t: i for t, i in cal["targets"].items()
               if isinstance(i, dict) and "cov_1sigma" in i}
         if tg:
             good = [t for t, i in tg.items() if 0.55 <= i["cov_1sigma"] <= 0.80]
-            out["L1"] = {"done": True, "passed": True if good else False,
-                         "detail": f"{len(good)}/{len(tg)} 个目标校准良好；"
+            _fresh = cal_st.get("freshness") == "fresh"
+            out["L1"] = {"done": True, "passed": True if good and _fresh else False,
+                         "fresh": _fresh,
+                         "detail": ("" if _fresh else "【历史结果】")
+                                   + f"{len(good)}/{len(tg)} 个目标校准良好；"
                                    + "；".join(f"{t}: 1σ={i['cov_1sigma']*100:.0f}%, k={i['factor']:.2f}"
                                                for t, i in list(tg.items())[:4])}
         else:
-            out["L1"] = {"done": True, "passed": False, "detail": "已运行但无有效目标（样本不足）。"}
+            out["L1"] = {"done": True, "passed": False, "fresh": True,
+                         "detail": "已运行但无有效目标（样本不足）。"}
     else:
-        out["L1"] = {"done": False, "passed": None, "detail": "暂无证据（未运行 L1 校准）。"}
+        out["L1"] = {"done": False, "passed": None, "fresh": False,
+                     "detail": "暂无证据（未运行 L1 校准；k=1 仅表示未缩放）。"}
 
-    # ---- L2 命中 ----
+    # ---- L2 命中（V1.8：双口径 + 时效） ----
+    from .validation_tracker import validation_status
+    val_st = validation_status(current_model_version, current_dataset_hash)
     val = _load_json(ROOT / "outputs" / "validation" / "validations.json")
     rounds = (val or {}).get("rounds") or []
     if rounds:
         judged = [r for r in rounds if r.get("hit_rate_1sigma") is not None]
+        _fresh_l2 = val_st.get("freshness") == "fresh"
         if judged:
             last = judged[-1]
             r1 = last["hit_rate_1sigma"]
-            out["L2"] = {"done": True, "passed": r1 >= 0.6,
-                         "detail": f"共 {len(judged)} 轮判定；最新 1σ 命中率 {r1*100:.0f}%"
+            sp_txt = (f"；达标率 {last['spec_pass_rate']*100:.0f}%"
+                      if last.get("spec_pass_rate") is not None else "")
+            out["L2"] = {"done": True, "passed": r1 >= 0.6 and _fresh_l2,
+                         "fresh": _fresh_l2,
+                         "detail": ("" if _fresh_l2 else "【历史基线】")
+                                   + f"共 {len(judged)} 轮判定；最新 1σ 覆盖率 {r1*100:.0f}%"
+                                   + sp_txt
                                    + (f"（2σ {last['hit_rate_2sigma']*100:.0f}%）"
                                       if last.get("hit_rate_2sigma") is not None else "")}
         else:
-            out["L2"] = {"done": True, "passed": False,
+            out["L2"] = {"done": True, "passed": False, "fresh": _fresh_l2,
                          "detail": f"有 {len(rounds)} 轮上传但无可判定记录（实测值待填写）。"}
     else:
-        out["L2"] = {"done": False, "passed": None,
+        out["L2"] = {"done": False, "passed": None, "fresh": False,
                      "detail": "暂无证据（未导出验证任务单或未回灌实测值）。"}
 
-    # ---- L3 效率 ----
+    # ---- L3 效率（V1.8：离线策略评估语义 + 时效） ----
+    from .benchmark import benchmark_status
+    bench_st = benchmark_status(current_model_version, current_dataset_hash)
     bench = _load_json(ROOT / "outputs" / "benchmark" / "效率对比结果.json")
     if bench and bench.get("feasible") and bench.get("saved_experiments") is not None:
         sv = bench["saved_experiments"]
-        out["L3"] = {"done": True, "passed": sv > 0,
-                     "detail": f"模型引导 vs 随机：节省 {sv:.0f} 次实验"
+        _fresh_l3 = bench_st.get("freshness") == "fresh"
+        out["L3"] = {"done": True, "passed": sv > 0 and _fresh_l3, "fresh": _fresh_l3,
+                     "detail": ("" if _fresh_l3 else "【历史模型/数据】")
+                               + f"离线重放节省 {sv:.0f} 次实验"
                                f"（引导中位 {bench['guided_median_steps']:.0f} vs "
                                f"随机中位 {bench['random_median_steps']:.0f}，"
-                               f"{bench['n_seeds']} 种子）"}
+                               f"{bench['n_seeds']} 种子；离线策略评估，非真实闭环记录）"}
     elif bench and bench.get("feasible") is False:
-        out["L3"] = {"done": True, "passed": False,
+        out["L3"] = {"done": True, "passed": False, "fresh": True,
                      "detail": "已运行但无法开展竞赛（数据集无达标点 / 规格过严）。"}
     else:
-        out["L3"] = {"done": False, "passed": None, "detail": "暂无证据（未运行 L3 效率基准）。"}
+        out["L3"] = {"done": False, "passed": None, "fresh": False,
+                     "detail": "暂无证据（未运行离线策略评估）。"}
 
-    # ---- L4 物理 ----
+    # ---- L4 物理合理性（V1.8：四级语义 + 时效） ----
+    from .physics_check import physics_status, _LEGACY_MAP
+    phys_st = physics_status(current_model_version, current_dataset_hash)
     phys = _load_json(ROOT / "outputs" / "physics" / "物理一致性结果.json")
     if phys and (phys.get("summary") or {}):
         s = phys["summary"]
+        if "PASS" in s and "SUPPORT" not in s:
+            s = {_LEGACY_MAP.get(k, k): v for k, v in s.items()}
         if s.get("n_checkable"):
             ratio = s["pass_ratio"]
-            out["L4"] = {"done": True, "passed": ratio >= 0.7,
-                         "detail": f"可检验 {s['n_checkable']} 条：PASS {s['PASS']} ｜ "
-                                   f"WEAK {s['WEAK']} ｜ FAIL {s['FAIL']}"
-                                   f"（通过率 {ratio*100:.0f}%）"}
+            _fresh_l4 = phys_st.get("freshness") == "fresh"
+            out["L4"] = {"done": True, "passed": ratio >= 0.7 and _fresh_l4,
+                         "fresh": _fresh_l4,
+                         "detail": ("" if _fresh_l4 else "【历史诊断】")
+                                   + f"可检验 {s['n_checkable']} 条：支持 {s['SUPPORT']} ｜ "
+                                   + f"证据不足 {s['INSUFFICIENT']} ｜ 局部相反 {s['OPPOSITE']}"
+                                   + f"（合理率 {ratio*100:.0f}%；同源证据诊断）"}
         else:
-            out["L4"] = {"done": True, "passed": None, "detail": "已运行但无可检验条目。"}
+            out["L4"] = {"done": True, "passed": None, "fresh": True,
+                         "detail": "已运行但无可检验条目。"}
     else:
         out["L4"] = {"done": False, "passed": None,
                      "detail": "暂无证据（未运行 L4 物理一致性检验）。"}
@@ -163,42 +197,52 @@ def _next_steps(verdicts, demo=False):
     return tips
 
 
-def generate_core_value_report(trigger="manual"):
-    """生成总报告；返回 (path, verdicts)。"""
-    verdicts = _layer_verdicts("")
+def generate_core_value_report(trigger="manual", current_model_version=None,
+                               current_dataset_hash=None):
+    """生成总报告；返回 (path, verdicts)。
+
+    V1.8：四个证据维度独立判定（非闯关）；结果绑定当前模型/数据时才算当前状态。
+    """
+    verdicts = _layer_verdicts("", current_model_version=current_model_version,
+                               current_dataset_hash=current_dataset_hash)
     done_layers = [k for k, v in verdicts.items() if v["done"]]
     passed_layers = [k for k, v in verdicts.items() if v.get("passed")]
+    stale_layers = [k for k, v in verdicts.items()
+                    if v["done"] and v.get("fresh") is False]
 
-    # 「通过到哪层」：按 L1→L4 顺序取连续通过段
-    deepest = None
-    for k in ["L1", "L2", "L3", "L4"]:
-        if verdicts[k].get("passed"):
-            deepest = k
-        else:
-            break
-
-    lines = ["# 核心价值验证报告（L1 → L4）", "",
+    lines = ["# 核心价值验证报告（四个证据维度，V1.8）", "",
              f"- 生成时间：{datetime.now().isoformat(timespec='seconds')}"
              f"（触发：{trigger}）",
-             "- 四层验证体系：L1 不确定度校准 → L2 推荐即命中 → L3 闭环效率 → L4 物理一致性",
+             f"- 当前上下文：模型 {current_model_version or '未加载'} ｜ "
+             f"数据 auto_{str(current_dataset_hash or '')[:8] or '未加载'}",
+             "- 证据维度（V1.8 语义，独立判定、非逐级闯关）：L1 不确定度校准 ｜ "
+               "L2 推荐即命中（区间覆盖 + 工程达标）｜ L3 离线策略评估 ｜ L4 物理合理性诊断",
              ""]
     lines += ["## 一页式结论", ""]
-    if deepest:
-        lines.append(f"- **平台核心价值当前通过到：{deepest}**（连续通过 L1→{deepest}）。")
+    if passed_layers:
+        lines.append(f"- **当前上下文下有效证据维度：{'、'.join(passed_layers)}**。")
     else:
-        lines.append("- 平台核心价值尚未有连续通过的层级，请按下方「下一步建议」逐层补齐证据。")
+        lines.append("- 当前上下文下暂无有效通过的维度，请按下方「下一步建议」补齐证据。")
+    if stale_layers:
+        lines.append(f"- ⚠ 历史结果（绑定旧模型/数据，不计入当前状态）：{'、'.join(stale_layers)}。")
     lines += [f"- 已运行：{('、'.join(done_layers) if done_layers else '无')}；"
-              f"通过：{('、'.join(passed_layers) if passed_layers else '无')}。", "",
-              "## 逐层证据状态", "",
-              "| 层 | 验证问题 | 状态 | 关键证据 |", "|---|---|---|---|"]
+              f"当前有效：{('、'.join(passed_layers) if passed_layers else '无')}。", "",
+              "## 逐维证据状态", "",
+              "| 维度 | 验证问题 | 状态 | 关键证据 |", "|---|---|---|---|"]
     q = {"L1": "模型给出的不确定度是否可信（校准性）",
-         "L2": "推荐的工艺点做实验能否落在预测区间内（推荐即命中）",
-         "L3": "模型引导寻优是否比随机试错省实验（闭环效率）",
-         "L4": "模型学到的规律是否符合喷涂物理（物理一致性）"}
+         "L2": "推荐工艺点的实测是否落进预测区间且工程达标（双口径）",
+         "L3": "模型引导寻优是否比随机试错省实验（离线策略评估）",
+         "L4": "模型规律是否符合喷涂物理（合理性诊断，同源证据）"}
     for k in ["L1", "L2", "L3", "L4"]:
         v = verdicts[k]
-        status = ("✅ 通过" if v.get("passed") else
-                  ("⚠️ 已运行未通过" if v["done"] else "— 未运行"))
+        if v.get("passed"):
+            status = "✅ 有效通过"
+        elif v["done"] and v.get("fresh") is False:
+            status = "🕘 历史结果（非当前上下文）"
+        elif v["done"]:
+            status = "⚠️ 已运行未通过"
+        else:
+            status = "— 未运行"
         lines.append(f"| {k} | {q[k]} | {status} | {v['detail']} |")
 
     lines += ["", "## 下一步建议", ""]
@@ -217,16 +261,14 @@ def generate_core_value_report(trigger="manual"):
     return REPORT_PATH, verdicts
 
 
-def core_value_status():
-    """轻量状态（首页徽标用，不读大文件）。"""
-    _, verdicts = generate_core_value_report.__wrapped__() if hasattr(
-        generate_core_value_report, "__wrapped__") else (None, None)
-    # 直接逐层轻量读取（避免在 status 路径重复生成报告）
-    v = _layer_verdicts("")
-    deepest = None
-    for k in ["L1", "L2", "L3", "L4"]:
-        if v[k].get("passed"):
-            deepest = k
-        else:
-            break
-    return {"layers": v, "deepest": deepest}
+def core_value_status(current_model_version=None, current_dataset_hash=None):
+    """轻量状态（首页徽标用，不读大文件）。
+
+    V1.8：四个证据维度独立状态（非闯关）；绑定当前上下文时才算有效通过。
+    """
+    v = _layer_verdicts("", current_model_version=current_model_version,
+                        current_dataset_hash=current_dataset_hash)
+    return {"layers": v,
+            "effective": [k for k in ["L1", "L2", "L3", "L4"] if v[k].get("passed")],
+            "stale": [k for k in ["L1", "L2", "L3", "L4"]
+                      if v[k]["done"] and v[k].get("fresh") is False]}

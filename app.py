@@ -38,6 +38,7 @@ from src import validation_tracker as vtrack_mod    # L2 推荐-验证闭环
 from src import benchmark as bench_mod              # L3 闭环效率基准
 from src import physics_check as phys_mod           # L4 物理一致性
 from src import core_value_report as cvr_mod        # L1-L4 汇总总报告
+from src import architecture_compare as arch_mod    # V1.8：架构消融对照
 
 st.set_page_config(page_title="双阳极等离子喷涂智能工艺设计平台", layout="wide")
 
@@ -217,6 +218,82 @@ st.caption("结构/工艺参数 + 材料/粉末属性 → 射流与粒子状态 
 
 
 # ---------------- 通用辅助 ----------------
+def _predict_chain_diagnostic(df_inputs, bundle, measured_states):
+    """V1.8（方案 §6.2）诊断预测：实测过程状态直接进入 Stage 2/3。
+
+    与 predict_chain 的区别仅在 Stage 1：实测状态以 pred_ 前缀构造下游特征
+    （与训练时 Stage 2 吃 Stage 1 OOF 的列名口径一致），跳过 Stage 1 模型。
+    实测状态不进入任何训练路径；本结果为诊断口径，不代表设计预测能力。
+    """
+    from src.features import add_physics_features as _apf
+
+    def _align(X, feature_names):
+        X = X.copy()
+        for c in feature_names:
+            if c not in X.columns:
+                X[c] = np.nan
+        return X[feature_names]
+
+    base = _apf(df_inputs.reindex(columns=bundle["x_cols"]))
+    mat_cols = bundle.get("material_cols") or []
+    if mat_cols:
+        base = pd.concat([base, df_inputs.reindex(columns=mat_cols)
+                           .apply(pd.to_numeric, errors="coerce")], axis=1)
+    # 实测状态 → pred_ 前缀（未实测的状态由 Stage 1 模型预测补充）
+    states = pd.DataFrame(index=df_inputs.index)
+    for t, m in bundle["stage1_models"].items():
+        states[t] = m.predict(_align(base, bundle["stage1_features"]))
+    for t, v in measured_states.items():
+        states[t] = float(v)          # 实测覆盖（诊断口径）
+
+    melt_cont = melt_class = melt_pred = None
+    if bundle.get("stage15_enabled"):
+        X15 = _align(pd.concat([base, states.add_prefix("pred_")], axis=1),
+                     bundle["stage15_features"])
+        melt_cont = pd.DataFrame(index=df_inputs.index)
+        melt_class = pd.DataFrame(index=df_inputs.index)
+        melt_pred = pd.DataFrame(index=df_inputs.index)
+        for t, m in bundle["stage15_models"].items():
+            if bundle["stage15_kind"].get(t) == "classification":
+                codes = np.asarray(m.predict(X15), dtype=float)
+                melt_pred[f"pred_{t}"] = codes
+                classes = bundle.get("stage15_classes", {}).get(t) or []
+                melt_class[t] = [classes[int(c)] if 0 <= int(c) < len(classes) else str(c)
+                                 for c in codes]
+            else:
+                vals15 = np.asarray(m.predict(X15), dtype=float)
+                melt_pred[f"pred_{t}"] = vals15
+                melt_cont[t] = vals15
+
+    parts2 = [base, states.add_prefix("pred_")] + ([melt_pred] if melt_pred is not None else [])
+    X2 = _align(pd.concat(parts2, axis=1), bundle["stage2_features"])
+    defects = pd.DataFrame(index=df_inputs.index)
+    for t, m in bundle["stage2_models"].items():
+        defects[t] = m.predict(X2)
+
+    parts3 = [base, states.add_prefix("pred_"), defects.add_prefix("pred_")] \
+        + ([melt_pred] if melt_pred is not None else [])
+    X3 = _align(pd.concat(parts3, axis=1), bundle["stage3_features"])
+    perf = pd.DataFrame(index=df_inputs.index)
+    unc = pd.DataFrame(index=df_inputs.index)
+    for t, info in bundle["stage3_models"].items():
+        m = info["model"]
+        perf[t] = m.predict(X3)
+        if info["kind"] == "GaussianProcess":
+            Xi = m.named_steps["imputer"].transform(X3)
+            Xs = m.named_steps["scale"].transform(Xi)
+            mean, std = m.named_steps["model"].predict(Xs, return_std=True)
+            perf[t] = mean
+            unc[t + "_std"] = std
+        elif info["kind"] == "RandomForest":
+            Xi = m.named_steps["imputer"].transform(X3)
+            rf = m.named_steps["model"]
+            tree_preds = np.column_stack([tree.predict(Xi) for tree in rf.estimators_])
+            unc[t + "_std"] = tree_preds.std(axis=1)
+    return states, defects, perf, unc, {"continuous": melt_cont or pd.DataFrame(),
+                                         "class": melt_class or pd.DataFrame()}
+
+
 def ensure_thermal_margin(df_):
     """V1.4：粒子温度与熔点都在时可计算 thermal_margin_C（显示为
     「粒子温度相对熔点差值」，严禁称为熔融率；温度超过熔点 ≠ 完全熔融）。"""
@@ -588,6 +665,41 @@ tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 with tab0:
     render_tab_header("tab0", CTX)
 
+    # ---------- V1.8（方案 §3）：研究工作台——当前该做什么（阻塞原因 + 下一步 + 待办） ----------
+    with st.container(border=True):
+        _todo = vtrack_mod.pending_counts()
+        _w_kb, _w_next = st.columns([3, 2])
+        with _w_kb:
+            # 阻塞原因判定（按流程链顺序，第一个不满足的即当前阻塞点）
+            if not CTX.get("dataset_loaded"):
+                _block, _act = "数据未加载", "② 数据管理：上传或选择数据来源"
+            elif not CTX.get("model_trained"):
+                _block, _act = "模型未训练", "③ 模型训练：开始训练（约 1–3 分钟）"
+            elif get_bundle() is None:
+                _block, _act = "模型已过期（数据已变化）", "③ 模型训练：用最新数据重新训练"
+            else:
+                _block, _act = None, "⑦ 逆向设计 → 导出验证任务单，安排实验"
+            st.markdown(f"**下一步**：" + (_act if _block is None
+                        else f"当前阻塞于「{_block}」——{_act}"))
+            # 待办徽标（待测候选 / 待审核实测）
+            _todo_bits = []
+            if _todo["pending_validation"]:
+                _todo_bits.append(f"待回灌候选 {_todo['pending_validation']} 个（⑥ 上传判定）")
+            _cal_b = get_bundle()
+            if _cal_b is not None and calib_mod.calibration_status(
+                    _cal_b.get("model_version")).get("done") is False:
+                _todo_bits.append("L1 未校准（③ 运行校准）")
+            if _todo_bits:
+                st.caption(" ｜ ".join(_todo_bits))
+            else:
+                st.caption("暂无待办事项。")
+        with _w_next:
+            # 一个随状态变化的主要操作（V1.8 方案 §3：工作台首屏原则）
+            if CTX.get("dataset_loaded") and CTX.get("model_trained") and get_bundle() is not None:
+                st.caption("核心动作：⑦ 逆向设计寻优（含验证任务单导出）")
+            else:
+                st.caption("核心动作：② 加载数据 → ③ 训练")
+
     # ---------- ⓪ 智能操作区（Smart Actions Hub，P0-1）：首屏第一视觉 ----------
     _smart_run_now = False
     with st.container():
@@ -715,15 +827,20 @@ with tab0:
     st.caption(f"研究模式：{CTX.get('research_mode_label')} ｜ 模型版本：{CTX.get('model_version') or '—'}"
                f" ｜ 状态与 ③ 模型训练 / ⑧ 结果输出 同源（同一 CTX）。")
 
-    # ---------------- V1.7 · 核心价值验证 L1→L4 状态徽标（首页概览） ----------------
-    _cv_status = cvr_mod.core_value_status()
-    _pill = {"L1": ("L1 校准", "③ 模型训练"), "L2": ("L2 推荐即命中", "⑥ 数据洞察"),
-             "L3": ("L3 闭环效率", "⑥ 数据洞察"), "L4": ("L4 物理一致", "⑤ 模型解析")}
+    # ---------------- V1.7/V1.8 · 核心价值验证四维证据徽标（首页概览） ----------------
+    # V1.8（方案 §3/§10）：四个证据维度独立判定（非闯关）；绑定当前模型/数据才显示有效通过
+    _cv_status = cvr_mod.core_value_status(
+        (get_bundle() or {}).get("model_version") if get_bundle() else None,
+        (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
+    _pill = {"L1": ("L1 校准", "③ 模型训练"), "L2": ("L2 覆盖+达标", "⑥ 数据洞察"),
+             "L3": ("L3 离线策略评估", "⑥ 数据洞察"), "L4": ("L4 物理合理性", "⑤ 模型解析")}
     _cols_cv = st.columns(4)
     for _cc, (_lk, (_lt, _loc)) in zip(_cols_cv, _pill.items()):
         _v = _cv_status["layers"].get(_lk) or {}
         if _v.get("passed"):
             _txt, _bg, _fg = f"✓ {_lt}", "#EAF3FB", "#3D5A78"
+        elif _v.get("done") and _v.get("fresh") is False:
+            _txt, _bg, _fg = f"🕘 {_lt}（历史）", "#F2F7FC", "#98A2B3"
         elif _v.get("done"):
             _txt, _bg, _fg = f"△ {_lt}（未通过）", "#FFF5F6", "#B77C87"
         else:
@@ -731,12 +848,20 @@ with tab0:
         _cc.markdown(
             f'<span class="status-pill" style="color:{_fg};background:{_bg};">{_txt} · {_loc}</span>',
             unsafe_allow_html=True)
-    if _cv_status.get("deepest"):
-        st.caption(f"核心价值验证当前连续通过到：**{_cv_status['deepest']}** ｜ "
-                   "总报告在「⑧ 结果输出 → 核心价值验证总报告」；四层入口见上方徽标。")
+    _eff = _cv_status.get("effective") or []
+    _stale = _cv_status.get("stale") or []
+    if _eff:
+        _eff_txt = "、".join(_eff)
+        _stale_txt = (" ｜ 历史结果（旧模型/数据，不计入当前）：" + "、".join(_stale) + "。") if _stale else ""
+        st.caption("当前上下文下有效证据维度：**" + _eff_txt + "**（结果绑定当前模型/数据）。"
+                   + _stale_txt
+                   + " 总报告在「⑧ 结果输出 → 核心价值验证总报告」。")
     else:
-        st.caption("核心价值验证（L1 校准 → L2 推荐即命中 → L3 闭环效率 → L4 物理一致）尚未有通过的层级；"
-                   "建议从「③ 模型训练 → L1 校准」开始逐层补齐证据。")
+        _stale_txt2 = ("；历史结果（旧模型/数据）：" + "、".join(_stale)) if _stale else ""
+        st.caption("核心价值验证（L1 校准 ｜ L2 覆盖+达标 ｜ L3 离线策略评估 ｜ L4 物理合理性）"
+                   "当前上下文下暂无有效通过的维度"
+                   + _stale_txt2
+                   + "。建议从「③ 模型训练 → L1 校准」开始补齐当前证据。")
 
     if use_demo and d is not None:
         evidence_mod.demo_banner()
@@ -1090,6 +1215,59 @@ with tab2:
             elif bundle.get("stage15_enabled") is False:
                 st.caption("当前数据缺少颗粒熔融状态标签，Stage 1.5 未启用。")
 
+        # ---------------- V1.8 P1 · 架构消融对照（直连 vs 双层 vs 缺陷增强链） ----------------
+        with st.expander("架构消融对照（课题双层主链 vs 直连基线 vs 缺陷增强三级链）",
+                         expanded=False):
+            st.caption("在**完全相同的外层分组交叉验证**下比较三种代理模型架构的端到端性能："
+                       "① 直连（工艺→性能）；② 双层（工艺→过程状态 OOF→性能，课题主线）；"
+                       "③ 缺陷增强链（工艺→过程→缺陷→性能，V1.7 三级链）。"
+                       "按方案 §5.2 晋级规则：缺陷层须在多数目标稳定降低误差才晋级为正式路径，"
+                       "否则三级链保留为研究支路。")
+            _arch_st = arch_mod.architecture_status()
+            if _arch_st.get("done"):
+                st.markdown(evidence_mod.badge_span(
+                    f"晋级判定：{_arch_st.get('promote')} ｜ {_arch_st['generated_at']}"
+                    + ("（历史结果）" if _arch_st.get("freshness") != "fresh" else ""),
+                    source_class="model", demo=use_demo), unsafe_allow_html=True)
+            _d_arch = current_df()
+            if _d_arch is None:
+                st.info("请先在「② 数据管理」加载数据。")
+            elif st.button("▶ 运行架构消融对照（约 3–8 分钟，三种架构各跑一轮外层 CV）",
+                           key="arch_run"):
+                _prog = st.status("架构消融对照运行中…", expanded=True)
+                _arch_lines = []
+
+                def _arch_cb(name, frac=None):
+                    _arch_lines.append(f"· {name}")
+                    _prog.write("\n".join(_arch_lines[-8:]))
+
+                try:
+                    with st.spinner(""):
+                        _arch_res = arch_mod.compare_architectures(
+                            _d_arch, schema, progress_cb=_arch_cb)
+                    rows_arch = []
+                    for t, r in _arch_res["comparison"].items():
+                        rows_arch.append({
+                            "性能目标": zh(t),
+                            "直连 R²": r.get("direct"),
+                            "双层 R²": r.get("two_layer"),
+                            "缺陷增强 R²": r.get("three_chain"),
+                            "双层增益": r.get("two_layer_gain"),
+                            "缺陷层增益": r.get("defect_gain"),
+                            "胜者": {"direct": "直连", "two_layer": "双层",
+                                     "three_chain": "缺陷增强"}.get(r.get("winner"), "—"),
+                        })
+                    st.dataframe(pd.DataFrame(rows_arch), width="stretch", hide_index=True)
+                    st.info(_arch_res["promote_text"])
+                    st.caption("选型证据声明：本对照分数用于选择正式预测路径（同轮比较），"
+                               "非无偏最终性能；被选架构的最终性能以独立外层验证为准。"
+                               "完整报告：outputs/architecture/架构对照报告.md")
+                    if use_demo:
+                        evidence_mod.demo_banner()
+                except Exception as e:
+                    _prog.update(label="架构对照失败", state="error")
+                    st.error(friendly_error(e, current_df(), schema))
+
         # ---------------- V1.7 · L1 不确定度校准（核心价值验证第一层） ----------------
         st.markdown("---")
         with st.container(border=True):
@@ -1097,12 +1275,23 @@ with tab2:
             st.caption("带 σ 的全链交叉验证（折划分规则与平台全链 CV 一致）→ 逐目标 1σ/2σ 实际覆盖率"
                        "（期望 ≈68% / ≈95%）→ 校准因子。校准后工艺预测与逆向设计的 σ 自动乘以该因子；"
                        "这是 L2 命中判定与 L3 悲观惩罚的基础。")
-            _cal_status = calib_mod.calibration_status()
-            if _cal_status.get("done"):
+            # V1.8（方案 §6.3/§10）：k=1 仅表示未缩放 ≠ 已可信；状态含时效性
+            _cal_bundle = get_bundle()
+            _cal_status = calib_mod.calibration_status(
+                (_cal_bundle or {}).get("model_version") if _cal_bundle else None,
+                (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
+            if _cal_status.get("done") and _cal_status.get("freshness") == "fresh":
                 st.markdown(evidence_mod.badge_span(
-                    f"已校准 ｜ {_cal_status['n_targets']} 目标（校准良好 {_cal_status['n_good']}）"
-                    f" ｜ {_cal_status['generated_at']}",
+                    f"已校准（当前模型/数据） ｜ {_cal_status['n_targets']} 目标"
+                    f"（校准良好 {_cal_status['n_good']}） ｜ {_cal_status['generated_at']}",
                     source_class="model", demo=use_demo), unsafe_allow_html=True)
+            elif _cal_status.get("done"):
+                st.markdown(evidence_mod.badge_span(
+                    f"历史校准结果 ｜ {_cal_status.get('freshness_note', '')}",
+                    source_class="model", demo=use_demo), unsafe_allow_html=True)
+            else:
+                st.caption("当前未校准（无校准文件；k=1 仅表示 σ 未做缩放，不代表不确定度已可信）——"
+                           "建议运行校准后再采信区间结论。")
             _d_cal = current_df()
             if _d_cal is None:
                 st.info("请先在「② 数据管理」加载数据后再运行校准。")
@@ -1115,8 +1304,10 @@ with tab2:
                     _prog.write("\n".join(_cal_lines[-10:]))
 
                 try:
-                    _cal_res = calib_mod.run_calibration(_d_cal, schema,
-                                                         progress_cb=lambda n, f=None: _cal_cb(n))
+                    _cal_res = calib_mod.run_calibration(
+                        _d_cal, schema, bundle=_cal_bundle,
+                        dataset_hash=(CTX.get("dataset_hash") if isinstance(CTX, dict) else None),
+                        progress_cb=lambda n, f=None: _cal_cb(n))
                     _rows_cal = []
                     for t, info in _cal_res["targets"].items():
                         if "cov_1sigma" in info:
@@ -1228,6 +1419,48 @@ with tab3:
                 value=float(default), key="predp_" + col)
             i += 1
 
+        # ---------------- V1.8 P1（方案 §6.2）：设计预测 vs 诊断预测两种任务分开 ----------------
+        st.markdown("---")
+        _pred_mode = st.radio(
+            "预测任务类型（两种口径分别报告，不得混用）",
+            ["设计预测（默认：只输入喷涂前可确定参数，用于逆向优化）",
+             "诊断预测（可填入实测过程状态，评估特定实验/测量信息价值）"],
+            index=0, key="pred_mode_radio",
+            help="设计预测只用喷涂前可获得的参数做全链推断；诊断预测允许用已实测的"
+                 "射流/粒子状态替代 Stage 1 模型预测。两者误差口径不同："
+                 "诊断高分不得当成设计预测能力。")
+        measured_states = {}
+        if _pred_mode.startswith("诊断"):
+            st.caption("勾选并填入【已实测】的过程状态（将直接进入 Stage 2/3，跳过 Stage 1 模型预测）。"
+                       "未勾选的状态仍由 Stage 1 模型推断。")
+            _d_diag = current_df()
+            _diag_cols = st.columns(3)
+            _k = 0
+            for t in bundle["state_cols"]:
+                if t not in (schema.get("process_states") or {}):
+                    continue
+                _dom = (bundle.get("training_domain") or {}).get(t) or {}
+                _med = None
+                if _d_diag is not None and t in _d_diag.columns:
+                    _med = pd.to_numeric(_d_diag[t], errors="coerce").median()
+                _c1, _c2 = _diag_cols[_k % 3].columns(2)
+                _use = _c1.checkbox(zh_short(t), key=f"diag_use_{t}",
+                                    help=f"实测{zh_short(t)}（勾选后按实测值进入下游）")
+                _v = _c2.number_input(
+                    "值", min_value=-1e6, max_value=1e6,
+                    value=float(_med) if pd.notna(_med) else
+                    float((_dom.get("min", 0) + _dom.get("max", 1)) / 2),
+                    key=f"diag_val_{t}", label_visibility="collapsed")
+                if _use:
+                    measured_states[t] = float(_v)
+                _k += 1
+            if measured_states:
+                st.info(f"诊断模式：{len(measured_states)} 个实测状态将直接进入下游"
+                        f"（{('、'.join(zh_short(t) for t in measured_states))}）——"
+                        "本结果为诊断口径，不代表设计预测能力。")
+        st.caption("V1.8 铁律：诊断预测的实测状态不进入设计模型训练（训练输入始终只用 OOF 预测），"
+                   "两种口径的误差分别报告。")
+
         # 训练数据覆盖范围检查（范围来源于训练数据，并非设备极限）——V1.6 收进次级证据区
         domain = bundle.get("training_domain") or {}
         if domain:
@@ -1265,7 +1498,12 @@ with tab3:
             else:
                 try:
                     X = pd.DataFrame([vals])
-                    states, defects, perf, unc, melt = predict_chain(X, bundle, return_melting=True)
+                    # V1.8（方案 §6.2）诊断模式：实测状态覆盖 Stage 1 预测
+                    if measured_states:
+                        states, defects, perf, unc, melt = _predict_chain_diagnostic(
+                            X, bundle, measured_states)
+                    else:
+                        states, defects, perf, unc, melt = predict_chain(X, bundle, return_melting=True)
                     std_map = unc.iloc[0].to_dict() if len(unc.columns) else {}
                     # V1.7（L1 联动）：σ 乘 L1 校准因子（无校准文件时因子=1，显示不变）
                     _cal_factors = calib_mod.load_factors()
@@ -1381,10 +1619,25 @@ with tab4:
                 # V1.6（P0-4/P1-4）：统一图入口 + 统计注脚 + Demo 水印 + 下载三件套
                 fig = pstyle.importance_chart(
                     imp, title=f"{zh_short(target)}关键影响因素排序 Top {len(imp)}")
+                # V1.8（方案 §2 诊断③）：n 取「该模型训练时的样本量」（fold_info 真实记录），
+                # 当前数据未加载时如实标「未知」，严禁填 0 冒充有效统计。
                 _df_an = current_df()
+                _n_an = None
+                try:
+                    _fi = (get_bundle().get("chain_cv") or {}).get("fold_info") or []
+                    if _fi:
+                        _n_an = int(max(f.get("n_train", 0) for f in _fi))
+                except Exception:
+                    _n_an = None
+                if _n_an is None and _df_an is not None:
+                    _n_an = int(len(_df_an))
+                from src.status_binding import fmt_n
                 pstyle.add_stat_note(fig, pstyle.stat_note(
-                    n=int(len(_df_an)) if _df_an is not None else 0,
+                    n=_n_an,
                     cv_method=(get_bundle().get("chain_cv") or {}).get("method")))
+                if _n_an is None:
+                    st.caption("注脚样本量：未知（当前未加载数据，且模型未记录训练样本量）。"
+                               "V1.8 规则：未知不填 0。")
                 if use_demo:
                     pstyle.add_demo_watermark(fig)
                 try:
@@ -1583,19 +1836,26 @@ with tab4:
         # ---------------- V1.7 · L4 物理一致性检验（核心价值验证第四层） ----------------
         st.markdown("---")
         with st.container(border=True):
-            st.markdown("**L4 · 物理一致性检验（模型规律是否符合喷涂物理）**")
-            st.caption("对每条物理期望（config/physics_expectations.yaml，可自定义）做两类证据交叉验证："
+            st.markdown("**L4 · 物理合理性诊断（模型规律是否符合喷涂物理）**")
+            st.caption("对每条物理期望（config/physics_expectations.yaml，可自定义）做两类证据交叉诊断："
                        "① 事实行 Spearman 相关符号（直接观测）；② 对应层级模型 PDP 部分依赖曲线的"
-                       " Theil-Sen 稳健斜率符号（模型推断）。一致且符合期望 → PASS；仅一类 → WEAK；"
-                       "相反 → FAIL（附原因分析与补实验建议）。")
-            _ph_st = phys_mod.physics_status()
-            if _ph_st.get("done"):
+                       " Theil-Sen 稳健斜率符号（模型推断）。四级判定：支持 / 证据不足 / 局部相反 / 超出适用域。"
+                       "【V1.8 声明】两类证据同源（同一数据、同一模型），不构成独立机理验证；"
+                       "期望方向本身是待检验假设，非预写结论。")
+            _ph_st = phys_mod.physics_status(
+                (bundle or {}).get("model_version") if bundle else None,
+                (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
+            if _ph_st.get("done") and _ph_st.get("freshness") == "fresh":
                 _s = _ph_st["summary"]
                 st.markdown(evidence_mod.badge_span(
-                    f"可检验 {_s['n_checkable']} 条：PASS {_s['PASS']} ｜ WEAK {_s['WEAK']}"
-                    f" ｜ FAIL {_s['FAIL']} ｜ {_ph_st['generated_at']}",
+                    f"支持 {_s['SUPPORT']} ｜ 证据不足 {_s['INSUFFICIENT']}"
+                    f" ｜ 局部相反 {_s['OPPOSITE']} ｜ {_ph_st['generated_at']}",
                     source_class="model", demo=use_demo), unsafe_allow_html=True)
-            if st.button("▶ 运行 L4 物理一致性检验", type="primary", key="phys_run"):
+            elif _ph_st.get("done"):
+                st.markdown(evidence_mod.badge_span(
+                    f"历史诊断结果 ｜ {_ph_st.get('freshness_note', '')}",
+                    source_class="model", demo=use_demo), unsafe_allow_html=True)
+            if st.button("▶ 运行 L4 物理合理性诊断", type="primary", key="phys_run"):
                 _d_ph = current_df()
                 if _d_ph is None:
                     st.info("请先在「② 数据管理」加载数据。")
@@ -1611,21 +1871,24 @@ with tab4:
                                 "Spearman ρ": (f"{v['spearman']:+.2f}" if v["spearman"] is not None else "不可用"),
                                 "n": v["n_pairs"] or "—",
                                 "PDP 斜率": (f"{v['pdp_slope']:+.3g}" if v["pdp_slope"] is not None else "不可用"),
-                                "判定": v["verdict"],
+                                "判定": phys_mod.VERDICT_ZH.get(v["verdict"], v["verdict"]),
+                                "适用范围": v.get("scope", "—"),
                             })
                         st.dataframe(pd.DataFrame(rows_ph), width="stretch", hide_index=True)
                         _s = _ph_res["summary"]
                         st.markdown(evidence_mod.badge_span(
-                            f"n={_s['n_checkable']} 可检验 ｜ PASS {_s['PASS']} ｜ WEAK {_s['WEAK']}"
-                            + (f" ｜ 通过率 {_s['pass_ratio']*100:.0f}%" if _s["pass_ratio"] is not None else ""),
+                            f"n={_s['n_checkable']} 可检验 ｜ 支持 {_s['SUPPORT']}"
+                            f" ｜ 证据不足 {_s['INSUFFICIENT']}"
+                            + (f" ｜ 合理率 {_s['pass_ratio']*100:.0f}%" if _s["pass_ratio"] is not None else ""),
                             source_class="model", demo=use_demo), unsafe_allow_html=True)
                         st.caption("计算方式：physics_check.run_physics_check；数据证据仅统计"
                                    " experimental / literature / CFD 事实行；模型证据对 GPR / RF / XGBoost "
                                    "统一采用 PDP（GPR 无 TreeSHAP 的严谨替代）。"
-                                   "完整报告：outputs/physics/物理一致性报告.md（含 FAIL 原因与补实验建议）")
-                        _fails = [v for v in _ph_res["verdicts"] if v["verdict"] == "FAIL"]
+                                   "完整报告：outputs/physics/物理合理性诊断报告.md（含局部相反项原因与补实验建议）。"
+                                   "【V1.8】两类证据同源，本检验为合理性诊断，不构成独立机理验证。")
+                        _fails = [v for v in _ph_res["verdicts"] if v["verdict"] == "OPPOSITE"]
                         if _fails:
-                            with st.expander(f"FAIL 条目原因分析与补实验建议（{len(_fails)} 条）",
+                            with st.expander(f"局部相反条目原因分析与补实验建议（{len(_fails)} 条）",
                                              expanded=True):
                                 for v in _fails:
                                     st.markdown(f"**{zh(v['x'])} → {zh(v['y'])}**")
@@ -1772,34 +2035,52 @@ with tab5:
             for _fc, (_ft, _fd) in zip(_fcols, _l2_flow):
                 _fc.markdown(f'<div class="flow-card"><h4>{_ft}</h4><p>{_fd}</p></div>',
                              unsafe_allow_html=True)
-            _vt_st = vtrack_mod.validation_status()
+            _vt_st = vtrack_mod.validation_status(
+                (get_bundle() or {}).get("model_version") if get_bundle() else None,
+                (CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
             if _vt_st.get("done"):
                 _h1 = _vt_st.get("last_hit_1sigma")
+                _sp = _vt_st.get("last_spec_pass_rate")
+                _stale = _vt_st.get("freshness") != "fresh"
                 st.markdown(evidence_mod.badge_span(
-                    f"已判定 {_vt_st['n_rounds']} 轮 ｜ 最新 1σ 命中率 "
+                    ("历史判定（推荐基线已过期）" if _stale else "已判定")
+                    + f" {_vt_st['n_rounds']} 轮 ｜ 最新 1σ 覆盖率 "
                     + (f"{_h1*100:.0f}%" if _h1 is not None else "待填写")
+                    + (f" ｜ 工程达标率 {_sp*100:.0f}%" if _sp is not None else "")
                     + f" ｜ {_vt_st['last_judged_at']}",
                     source_class="direct", demo=use_demo), unsafe_allow_html=True)
             _vt_file = st.file_uploader("上传已填实测值的验证任务单（Excel）",
                                         type=["xlsx"], key="vt_upload")
-            if _vt_file is not None and st.button("▶ 判定推荐命中率", type="primary",
-                                                   key="vt_judge"):
+            if _vt_file is not None and st.button("▶ 判定（双口径：区间覆盖 + 工程达标）",
+                                                   type="primary", key="vt_judge"):
                 try:
                     _vt_df = pd.read_excel(_vt_file, sheet_name=0)
-                    with st.spinner("匹配候选预测并逐目标判定…"):
-                        _vt_rep = vtrack_mod.judge_validation(_vt_df, demo=use_demo)
+                    with st.spinner("匹配候选预测并逐目标判定（冻结预测基线）…"):
+                        _vt_rep = vtrack_mod.judge_validation(
+                            _vt_df, demo=use_demo, spec=vtrack_mod.DEFAULT_SPEC,
+                            bundle=get_bundle())
                     if _vt_rep.get("hit_rate_1sigma") is not None:
                         _r1, _r2 = _vt_rep["hit_rate_1sigma"], _vt_rep["hit_rate_2sigma"]
-                        st.success(f"本轮判定 {_vt_rep['n_judged_pairs']} 个目标-样本对："
-                                   f"1σ 命中率 {_r1*100:.0f}% ｜ 2σ 命中率 {_r2*100:.0f}%")
+                        st.success(f"【口径一 · 区间覆盖】{_vt_rep['n_judged_pairs']} 个目标-样本对："
+                                   f"1σ {_r1*100:.0f}% ｜ 2σ {_r2*100:.0f}%")
+                        if _vt_rep.get("spec_pass_rate") is not None:
+                            st.info(f"【口径二 · 工程达标】单目标达标率 "
+                                    f"{_vt_rep['spec_pass_rate']*100:.0f}%"
+                                    + (f" ｜ 联合达标 {_vt_rep['joint_pass_count']}/"
+                                       f"{_vt_rep['joint_den']}"
+                                       if _vt_rep.get("joint_den") else " ｜ 联合达标：未完成（缺测）"))
                         st.markdown(evidence_mod.badge_span(
-                            f"1σ 命中 {_r1*100:.0f}% ｜ 2σ 命中 {_r2*100:.0f}%"
-                            f" ｜ 判定对数 {_vt_rep['n_judged_pairs']}",
+                            f"1σ 覆盖 {_r1*100:.0f}% ｜ 2σ 覆盖 {_r2*100:.0f}%"
+                            + (f" ｜ 达标 {_vt_rep['spec_pass_rate']*100:.0f}%"
+                               if _vt_rep.get("spec_pass_rate") is not None else "")
+                            + f" ｜ 判定对数 {_vt_rep['n_judged_pairs']}",
                             source_class="direct", demo=use_demo), unsafe_allow_html=True)
+                        if _vt_rep.get("calibration_note"):
+                            st.caption(f"⚠ {_vt_rep['calibration_note']}")
                         if _r1 < 0.6:
                             _wt = _vt_rep.get("worst_target")
                             _wt_txt = f"（偏差最大目标：{zh(_wt)}）" if _wt else ""
-                            st.warning(f"1σ 命中率低于 60%{_wt_txt}：建议检查 L1 校准因子是否已应用、"
+                            st.warning(f"1σ 覆盖率低于 60%{_wt_txt}：建议检查 L1 校准因子是否已应用、"
                                        "偏差最大目标在稀疏参数区域补充实验，并把逆向设计候选的悲观惩罚收紧。")
                     else:
                         st.info("本轮没有可判定记录：任务单中的实测值尚未填写（或 σ 不可用）。"
@@ -1852,15 +2133,21 @@ with tab5:
                         with st.spinner(""):
                             _bm_res = bench_mod.run_benchmark(
                                 _d_bm, schema, spec=_bm_spec, n_init=_bm_init,
-                                n_batch=_bm_batch, n_seeds=_bm_seeds, progress_cb=_bm_cb)
+                                n_batch=_bm_batch, n_seeds=_bm_seeds, progress_cb=_bm_cb,
+                                bundle=_b_in)
                         if _bm_res.get("feasible"):
                             _sv = _bm_res["saved_experiments"]
                             _g_m, _r_m = _bm_res["guided_median_steps"], _bm_res["random_median_steps"]
                             if _sv is not None and _sv > 0:
                                 st.success(f"达到目标规格：模型引导 {_g_m:.0f} 次 vs 随机 {_r_m:.0f} 次"
-                                           f"（中位数，{_bm_seeds} 种子）——平均节省 {_sv:.0f} 次实验。")
+                                           f"（中位数，{_bm_seeds} 种子全部达成）——离线重放节省 {_sv:.0f} 次实验。")
                             else:
-                                st.warning("模型引导未跑赢随机基线，详见下方解释与排查建议。")
+                                _sr = _bm_res.get("guided_success_ratio")
+                                st.warning("未全部达成或未跑赢（V1.8 规则：不强行填节省次数；"
+                                           "保留各种子状态与成功比例"
+                                           + (f"：引导更快 {_bm_res.get('guided_success_count')}/"
+                                              f"{_bm_res.get('n_both_completed')}（{_sr*100:.0f}%）"
+                                              if _sr is not None else "") + "）。详见下方解释与排查建议。")
                             st.markdown(evidence_mod.badge_span(
                                 f"引导中位 {_g_m} ｜ 随机中位 {_r_m}"
                                 + (f" ｜ 节省 {_sv} 次" if _sv is not None else "")
@@ -1881,7 +2168,7 @@ with tab5:
                                     y=np.concatenate([np.clip(_mean - _std, 0, None), (_mean + _std)[::-1]]),
                                     fill="toself", fillcolor=_color, opacity=0.12,
                                     line=dict(width=0), name=f"{_label} ±1σ", showlegend=False))
-                            pstyle.nature_layout(_fig_bm, title="闭环效率对比（累计实验次数 vs 归一化超体积）",
+                            pstyle.nature_layout(_fig_bm, title="离线策略评估（累计实验次数 vs 归一化超体积）",
                                                  height=380)
                             _fig_bm.update_xaxes(title_text="累计实验次数")
                             _fig_bm.update_yaxes(title_text="归一化超体积（MC 估计）")
@@ -2123,14 +2410,18 @@ with tab7:
         st.markdown("---")
         with st.container(border=True):
             st.markdown("**核心价值验证总报告（L1→L4 汇总）**")
-            st.caption("汇总四层验证证据：L1 不确定度校准 → L2 推荐即命中 → L3 闭环效率 → "
-                       "L4 物理一致性；一页式结论回答「平台核心价值通过到哪层、还缺哪条证据、"
-                       "下一步做什么实验」。缺失层明确写「暂无证据」，不编造。")
+            st.caption("汇总四个证据维度（V1.8 独立判定，非闯关）：L1 不确定度校准 ｜ "
+                       "L2 推荐即命中（区间覆盖 + 工程达标）｜ L3 离线策略评估 ｜ "
+                       "L4 物理合理性诊断；一页式结论回答「当前上下文下哪些维度有效、"
+                       "还缺哪条证据、下一步做什么实验」。缺失维度明确写「暂无证据」，不编造；"
+                       "历史结果（旧模型/数据）单独标注，不计入当前状态。")
             if st.button("▶ 生成 / 刷新核心价值验证总报告", type="primary", key="cvr_gen"):
                 try:
                     with st.spinner("汇总 L1–L4 产物…"):
                         _cvr_path, _ = cvr_mod.generate_core_value_report(
-                            trigger="⑧ 结果输出 · 手动生成")
+                            trigger="⑧ 结果输出 · 手动生成",
+                            current_model_version=(bundle7 or {}).get("model_version") if bundle7 else None,
+                            current_dataset_hash=(CTX.get("dataset_hash") if isinstance(CTX, dict) else None))
                     st.success(f"总报告已生成：{_cvr_path}")
                     st.markdown(_cvr_path.read_text(encoding="utf-8"))
                     with open(_cvr_path, "rb") as _f:

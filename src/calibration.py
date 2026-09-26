@@ -33,6 +33,7 @@ from scipy import stats as sps
 from .config import ROOT
 from .model_chain import train_chain, predict_chain
 from .research_utils import fmt_metric
+from .status_binding import bind_identity, freshness
 
 CALIB_FILE = ROOT / "models" / "calibration.json"
 CALIB_DIR = ROOT / "outputs" / "calibration"
@@ -67,12 +68,16 @@ def _chain_folds(df, seed=SEED):
     return list(KFold(n_splits=5, shuffle=True, random_state=seed).split(df))
 
 
-def run_calibration(df, schema, *, seed=SEED, progress_cb=None):
+def run_calibration(df, schema, *, seed=SEED, progress_cb=None, bundle=None,
+                    dataset_hash=None):
     """运行带 σ 的全链 CV 并产出校准指标。
 
     返回 dict：{"method", "generated_at", "targets": {t: {n, cov_1sigma, cov_2sigma,
     z_var, factor, verdict}}, "oof": DataFrame}；同时落盘 calibration.json、
     校准曲线 PNG（matplotlib 论文版）与校准报告 md。
+
+    V1.8：结果绑定 model_version / dataset_version（bundle 传入时），
+    重训或换数据后自动判为过期（见 status_binding.freshness）。
     """
     if df is None or len(df) < 10:
         raise ValueError("校准需要至少 10 行数据。")
@@ -152,6 +157,8 @@ def run_calibration(df, schema, *, seed=SEED, progress_cb=None):
         "targets": targets_out,
         "oof_with_std": oof_all,
     }
+    # V1.8：身份绑定（模型/数据版本）——重训后自动失效
+    bind_identity(result, bundle=bundle, dataset_hash=dataset_hash)
 
     # ---- 落盘：calibration.json（因子供下游使用）----
     CALIB_DIR.mkdir(parents=True, exist_ok=True)
@@ -268,16 +275,36 @@ def apply_calibration(unc_df, factors=None):
     return out
 
 
-def calibration_status():
-    """供状态面板：是否已校准 + 通过与否。"""
+def calibration_status(current_model_version=None, current_dataset_hash=None):
+    """供状态面板：是否已校准 + 通过与否 + V1.8 时效性。
+
+    current_* 传入时检查绑定：不匹配 → freshness="stale"/"unknown"，
+    上层界面应以「历史结果」展示，不得作为当前通过状态。
+    """
     try:
         with open(CALIB_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return {"done": False}
+        return {"done": False, "uncalibrated": True}
     tg = data.get("targets") or {}
     ok = [i for i in tg.values() if isinstance(i, dict) and "cov_1sigma" in i]
     good = [i for i in ok if GOOD_COV1[0] <= i["cov_1sigma"] <= GOOD_COV1[1]]
+    fr = freshness(data, current_model_version, current_dataset_hash)
     return {"done": True, "n_targets": len(ok), "n_good": len(good),
             "generated_at": data.get("generated_at"),
-            "factors": {t: i.get("factor") for t, i in tg.items() if isinstance(i, dict)}}
+            "factors": {t: i.get("factor") for t, i in tg.items() if isinstance(i, dict)},
+            "freshness": fr["state"], "freshness_note": fr["note"]}
+
+
+def is_calibrated_for(current_model_version=None, current_dataset_hash=None):
+    """V1.8（方案 §6.3）：k=1 的真实含义是「未做缩放」，不等于已可信。
+
+    返回 (calibrated: bool, note: str)——下游悲观惩罚/正式机会约束结论
+    只有 calibrated=True 时才可用。
+    """
+    st = calibration_status(current_model_version, current_dataset_hash)
+    if not st.get("done"):
+        return False, "未校准（无校准文件，k=1 仅表示未缩放）"
+    if st.get("freshness") != "fresh":
+        return False, f"校准已过期：{st.get('freshness_note', '')}"
+    return True, ""

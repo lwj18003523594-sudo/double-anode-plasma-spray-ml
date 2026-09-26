@@ -210,8 +210,8 @@ def _simulate_strategy(df, schema, spec, data, *, labeled_idx, pool_idx, guided,
 
 
 def run_benchmark(df, schema, *, spec=None, n_init=15, n_batch=5, n_seeds=5,
-                   seed=SEED, progress_cb=None):
-    """执行闭环效率重放竞赛。
+                   seed=SEED, progress_cb=None, bundle=None):
+    """执行离线策略评估（V1.8 措辞：重放竞赛，非真实闭环实验记录）。
 
     返回 dict（含曲线、节省次数 N 与解释），并落盘结果 json、对比曲线图与报告。
     """
@@ -292,6 +292,12 @@ def run_benchmark(df, schema, *, spec=None, n_init=15, n_batch=5, n_seeds=5,
     r_med = float(np.nanmedian(r_arr)) if np.any(~np.isnan(r_arr)) else None
     saved = (r_med - g_med) if (g_med is not None and r_med is not None) else None
     feasible_all = not (np.any(np.isnan(g_arr)) or np.any(np.isnan(r_arr)))
+    # V1.8（方案 §9）：未达标运行保留未达标状态与成功比例，不强行填节省次数
+    both_done = (~np.isnan(g_arr)) & (~np.isnan(r_arr))
+    guided_win = int(np.sum((g_arr < r_arr) & both_done))
+    n_both_done = int(np.sum(both_done))
+    guided_done = int(np.sum(~np.isnan(g_arr)))
+    success_ratio = round(guided_win / n_both_done, 4) if n_both_done else None
 
     result = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -303,10 +309,18 @@ def run_benchmark(df, schema, *, spec=None, n_init=15, n_batch=5, n_seeds=5,
         "guided_steps": [None if np.isnan(x) else int(x) for x in g_arr],
         "random_steps": [None if np.isnan(x) else int(x) for x in r_arr],
         "guided_median_steps": g_med, "random_median_steps": r_med,
-        "saved_experiments": saved, "feasible": True,
+        "saved_experiments": saved if feasible_all else None,
+        "saved_valid": bool(feasible_all),
+        "guided_success_count": guided_win, "n_both_completed": n_both_done,
+        "guided_success_ratio": success_ratio,
+        "n_guided_completed": guided_done,
+        "feasible": True,
         "guided_curves": g_curves, "random_curves": r_curves,
         "n_ok_ratio": round(n_ok / len(sub), 4),
     }
+    from .status_binding import bind_identity
+    bind_identity(result, bundle=bundle,
+                  note="评估类型：离线策略评估（非真实闭环实验记录）")
     explanation = []
     if saved is not None and saved > 0:
         explanation.append(
@@ -392,8 +406,10 @@ def _plot_curves(g_curves, r_curves, spec, result):
 
 def _write_report(result):
     from .ui_labels import zh
-    lines = ["# L3 · 闭环效率基准对比报告（核心价值主证据）", "",
+    lines = ["# L3 · 离线策略评估报告（模型引导 vs 随机基线重放竞赛，V1.8 语义）", "",
              f"- 生成时间：{result['generated_at']}",
+             f"- 绑定：{result.get('binding', {}).get('model_version') or '未知模型'} / "
+             f"数据 {str(result.get('binding', {}).get('dataset_hash') or '')[:8] or '未知'}",
              f"- 目标规格：{' 且 '.join(_spec_text(result['spec']))}",
              f"- 重放样本：{result['n_replay']} 行（三目标真实标签齐全）；"
              f"其中满足规格 {result['n_target_points']} 行（{result.get('n_ok_ratio', 0)*100:.0f}%）",
@@ -406,14 +422,22 @@ def _write_report(result):
         (BENCH_DIR / "效率对比报告.md").write_text("\n".join(lines), encoding="utf-8")
         return
     g, r = result["guided_median_steps"], result["random_median_steps"]
-    lines += ["## 核心数字", "",
+    lines += ["## 核心数字（离线候选池策略效率）", "",
               f"- 模型引导：达标所需实验数中位数 **{g:.0f}**（各种子：{result['guided_steps']}）",
-              f"- 随机基线：达标所需实验数中位数 **{r:.0f}**（各种子：{result['random_steps']}）",
-              (f"- **节省 N = {result['saved_experiments']:.0f} 次实验**"
-               if result["saved_experiments"] is not None else "- 节省次数不可计算（存在未达成种子）"),
-              "", "## 解释", "", result["explanation"], "",
-              "![闭环效率对比](闭环效率对比.png)", "",
-              "## 真实迭代收敛曲线", ""]
+              f"- 随机基线：达标所需实验数中位数 **{r:.0f}**（各种子：{result['random_steps']}）"]
+    if result.get("saved_valid") and result["saved_experiments"] is not None:
+        lines += [f"- **全部种子达成下，离线重放节省 N = {result['saved_experiments']:.0f} 次实验**"]
+    else:
+        sr = result.get("guided_success_ratio")
+        lines += ["- **节省次数不填报**（部分种子未在池耗尽前达成；V1.8 规则：未达标保留状态，不强行填数）",
+                  f"- 成功比例：引导策略更快达标的种子 {result.get('guided_success_count', 0)}/"
+                  f"{result.get('n_both_completed', 0)}"
+                  + (f"（{sr*100:.0f}%）" if sr is not None else "")]
+    lines += ["", "## 解释", "", result["explanation"], "",
+              "![离线策略评估对比](闭环效率对比.png)", "",
+              "> **证据范围声明（V1.8）**：本评估为离线重放（策略评估），真实节省实验数"
+              "需前瞻实验记录支持；结论名称「离线候选池策略效率」，非真实闭环效率。", "",
+              "## 历史迭代参考", ""]
     # 真实迭代：历史模型版本样本量序列（各版本训练数据快照未存档，超体积无法回算）
     try:
         import glob as _g
@@ -440,12 +464,18 @@ def _write_report(result):
     (BENCH_DIR / "效率对比报告.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def benchmark_status():
+def benchmark_status(current_model_version=None, current_dataset_hash=None):
+    """V1.8：含时效性（离线策略评估结果绑定当时的模型/数据）。"""
     try:
         with open(RESULT_FILE, encoding="utf-8") as f:
             data = json.load(f)
+        from .status_binding import freshness
+        fr = freshness(data, current_model_version, current_dataset_hash)
         return {"done": True, "saved": data.get("saved_experiments"),
+                "saved_valid": data.get("saved_valid"),
+                "guided_success_ratio": data.get("guided_success_ratio"),
                 "generated_at": data.get("generated_at"),
-                "feasible": data.get("feasible")}
+                "feasible": data.get("feasible"),
+                "freshness": fr["state"], "freshness_note": fr["note"]}
     except Exception:
         return {"done": False}

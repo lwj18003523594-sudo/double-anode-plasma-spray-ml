@@ -13,13 +13,13 @@
       —— 平台 Stage 3 为 GPR / RF、Stage 1/2 为 XGBoost；GPR 无法用 TreeSHAP，
       故统一采用 partial_dependence（对三类模型均严谨适用）。
 
-  判定（指令集规则 + 诚实降级）：
-    PASS        两类证据符号一致且符合期望方向
-    WEAK        仅一类证据支持（另一类缺失）
-    FAIL        两类证据一致但均与期望相反，或两类证据互相矛盾
-    UNVERIFIED  两类证据均缺失（变量不在当前数据/模型中）
+  判定（V1.8 四级语义，两类证据同源、非独立机理验证）：
+    SUPPORT       两类证据符号一致且符合期望方向（「支持」）
+    INSUFFICIENT  仅一类证据支持（「证据不足」，不下结论）
+    OPPOSITE      两类证据一致但均与期望相反，或互相矛盾（「局部相反」，附原因与补实验建议）
+    OUT_OF_SCOPE  两类证据均缺失（「超出适用域/不可检验」）
 
-  FAIL 项必须给出可能原因（变化范围窄 / 共线性 / 过拟合或噪声）与针对性补实验建议。
+  OPPOSITE 项必须给出可能原因（变化范围窄 / 共线性 / 过拟合或噪声）与针对性补实验建议。
 
 设计铁律（V1.6 继承）：不修改任何既有模块；结论句由真实数值拼接；固定种子 42。
 """
@@ -34,11 +34,24 @@ from scipy import stats as sps
 
 from .config import ROOT
 from .features import add_physics_features
+from .status_binding import bind_identity, freshness
 
 EXPECT_FILE = ROOT / "config" / "physics_expectations.yaml"
 PHYS_DIR = ROOT / "outputs" / "physics"
 RESULT_FILE = PHYS_DIR / "物理一致性结果.json"
 SEED = 42
+
+# V1.8（方案 §7）：L4 判定改为四级「合理性诊断」语义，且明确两类证据同源
+# （Spearman 与模型 PDP 基于同一份数据/同一模型，不构成两组独立机理验证）。
+VERDICT_ZH = {
+    "SUPPORT": "支持",
+    "INSUFFICIENT": "证据不足",
+    "OPPOSITE": "局部相反",
+    "OUT_OF_SCOPE": "超出适用域",
+}
+# 与 V1.7 判定词的映射（历史结果读取用）
+_LEGACY_MAP = {"PASS": "SUPPORT", "WEAK": "INSUFFICIENT", "FAIL": "OPPOSITE",
+               "UNVERIFIED": "OUT_OF_SCOPE"}
 
 # 期望方向 → 符号
 _DIR_SIGN = {"正": +1, "负": -1, "+": +1, "-": -1, "positive": +1, "negative": -1}
@@ -216,38 +229,52 @@ def run_physics_check(df, bundle, schema, *, expectations=None):
         else:
             item["notes"].append(f"{y} 没有对应层级模型（当前数据未建模该目标）。")
 
-        # ---- 判定 ----
+        # ---- 判定（V1.8 四级语义：两类证据同源，非独立机理验证）----
         s_data = int(np.sign(item["spearman"])) if item["spearman"] is not None else None
         s_model = int(np.sign(item["pdp_slope"])) if item["pdp_slope"] not in (None, 0) else \
             (None if item["pdp_slope"] is None else 0)
         if s_data is None and s_model is None:
-            item["verdict"] = "UNVERIFIED"
+            item["verdict"] = "OUT_OF_SCOPE"
         elif s_data == exp_sign and s_model == exp_sign:
-            item["verdict"] = "PASS"
+            item["verdict"] = "SUPPORT"
         elif s_data == -exp_sign and s_model == -exp_sign:
-            item["verdict"] = "FAIL"
+            item["verdict"] = "OPPOSITE"
         elif (s_data is not None and s_model is not None and s_data == -s_model):
-            item["verdict"] = "FAIL"
+            item["verdict"] = "OPPOSITE"
             item["notes"].append("数据证据与模型证据方向互相矛盾（需排查数据质量与模型拟合）。")
         else:
-            # 仅一类支持；另一类缺失或为 0（无明确方向）
-            item["verdict"] = "WEAK"
-        if item["verdict"] == "FAIL":
+            # 仅一类支持；另一类缺失或为 0（无明确方向）——证据不足，不下结论
+            item["verdict"] = "INSUFFICIENT"
+        # 适用范围：当前数据中 x 的实际覆盖区间（V1.8 方案 §7：每条规则记录适用范围）
+        if x in df.columns:
+            xv = pd.to_numeric(df[x], errors="coerce").dropna()
+            if len(xv):
+                item["scope"] = f"x 覆盖区间 [{xv.min():.3g}, {xv.max():.3g}]（n={len(xv)}）"
+        if item["verdict"] == "OPPOSITE":
             notes, advice = _diagnose_fail(df, schema, x, y, exp_sign)
             item["notes"] += notes
             item["advice"] = advice
         verdicts.append(item)
 
-    n_map = {"PASS": 0, "WEAK": 0, "FAIL": 0, "UNVERIFIED": 0}
+    n_map = {"SUPPORT": 0, "INSUFFICIENT": 0, "OPPOSITE": 0, "OUT_OF_SCOPE": 0}
     for v in verdicts:
         n_map[v["verdict"]] += 1
-    n_checkable = n_map["PASS"] + n_map["WEAK"] + n_map["FAIL"]
+    n_checkable = n_map["SUPPORT"] + n_map["INSUFFICIENT"] + n_map["OPPOSITE"]
     summary = {**n_map, "n_checkable": n_checkable,
-               "pass_ratio": round((n_map["PASS"] + n_map["WEAK"]) / n_checkable, 4)
+               "pass_ratio": round((n_map["SUPPORT"] + n_map["INSUFFICIENT"]) / n_checkable, 4)
                if n_checkable else None}
 
     result = {"generated_at": datetime.now().isoformat(timespec="seconds"),
-              "seed": SEED, "verdicts": verdicts, "summary": summary}
+              "seed": SEED, "verdicts": verdicts, "summary": summary,
+              "verdict_semantics": "V1.8 四级：支持/证据不足/局部相反/超出适用域；"
+                                   "Spearman 与模型 PDP 同源，非独立机理验证",
+              "evidence_caveat": "本检验为物理合理性诊断（V1.8 措辞），"
+                                "不构成对真实机理的独立验证证据。"}
+    # V1.8：身份绑定 + 规则版本（期望表内容 hash）
+    import hashlib as _hl
+    rule_version = _hl.md5(EXPECT_FILE.read_bytes()).hexdigest()[:8]
+    bind_identity(result, bundle=bundle, rule_version=rule_version,
+                  note="规则版本 rule_v8_" + rule_version)
 
     PHYS_DIR.mkdir(parents=True, exist_ok=True)
     with open(RESULT_FILE, "w", encoding="utf-8") as f:
@@ -259,53 +286,68 @@ def run_physics_check(df, bundle, schema, *, expectations=None):
 def _write_report(result):
     from .ui_labels import zh
     s = result["summary"]
-    lines = ["# L4 · 物理一致性检验报告", "",
+    lines = ["# L4 · 物理合理性诊断报告（V1.8 语义）", "",
              f"- 生成时间：{result['generated_at']}",
+             f"- 绑定：{result.get('binding', {}).get('model_version', '未知模型')} / "
+             f"数据 {str(result.get('binding', {}).get('dataset_hash') or '')[:8] or '未知'}"
+             f" / {result.get('binding', {}).get('note', '')}",
              "- 证据 A（直接观测）：事实行 Spearman 相关系数符号（model_prediction / "
              "optimization_candidate 行不参与）",
              "- 证据 B（模型推断）：y 所在层级模型 PDP 部分依赖曲线的 Theil-Sen 稳健斜率符号",
-             "- 判定：两类一致且符合期望 → PASS；仅一类支持 → WEAK；相反/矛盾 → FAIL；均缺 → UNVERIFIED",
+             "- **证据声明：A 与 B 基于同一份数据与同一模型，不构成两组独立机理验证**（V1.8）",
+             "- 判定（四级）：一致且符合期望 → 支持；仅一类支持 → 证据不足；"
+             "相反/矛盾 → 局部相反；均缺 → 超出适用域",
              "", "## 逐条判定表", "",
-             "| # | 物理期望 | 期望方向 | Spearman ρ (n) | PDP 斜率 (特征) | 判定 |",
-             "|---|---|---|---|---|---|"]
+             "| # | 物理期望 | 期望方向 | Spearman ρ (n) | PDP 斜率 (特征) | 判定 | 适用范围 |",
+             "|---|---|---|---|---|---|---|"]
     for v in result["verdicts"]:
         sp_txt = (f"{v['spearman']:+.2f} (n={v['n_pairs']})" if v["spearman"] is not None
                   else "不可用")
         pd_txt = (f"{v['pdp_slope']:+.3g} ({v['pdp_feature']}, 网格 {v['pdp_grid']} 点)"
                   if v["pdp_slope"] is not None else "不可用")
+        vd = VERDICT_ZH.get(v["verdict"], v["verdict"])
         lines.append(f"| {v['idx']+1} | {zh(v['x'])} → {zh(v['y'])} | {v['dir']} "
-                     f"| {sp_txt} | {pd_txt} | **{v['verdict']}** |")
-    lines += ["", "## 判定依据（物理机理）", ""]
+                     f"| {sp_txt} | {pd_txt} | **{vd}** | {v.get('scope', '—')} |")
+    lines += ["", "## 判定依据（物理机理假设，待数据检验）", ""]
     for v in result["verdicts"]:
         lines.append(f"- {zh(v['x'])} → {zh(v['y'])}（期望{v['dir']}）：{v['basis']}")
-    fails = [v for v in result["verdicts"] if v["verdict"] == "FAIL"]
+    fails = [v for v in result["verdicts"] if v["verdict"] == "OPPOSITE"]
     if fails:
-        lines += ["", "## FAIL 项原因分析与补实验建议", ""]
+        lines += ["", "## 局部相反项原因分析与补实验建议", ""]
         for v in fails:
-            lines.append(f"### {zh(v['x'])} → {zh(v['y'])}")
+            lines.append(f"### {zh(v['x'])} → {zh(v['y'])}（适用范围：{v.get('scope', '—')}）")
             for n_ in v["notes"]:
                 lines.append(f"- 可能原因：{n_}")
             for a in v["advice"]:
                 lines.append(f"- 补实验建议：{a}")
     lines += ["", "## 总结", "",
-              f"- 可检验条目 {s['n_checkable']} 条：PASS {s['PASS']} ｜ WEAK {s['WEAK']} ｜ "
-              f"FAIL {s['FAIL']} ｜ UNVERIFIED {s['UNVERIFIED']}"]
+              f"- 可检验条目 {s['n_checkable']} 条：支持 {s['SUPPORT']} ｜ "
+              f"证据不足 {s['INSUFFICIENT']} ｜ 局部相反 {s['OPPOSITE']} ｜ "
+              f"超出适用域 {s['OUT_OF_SCOPE']}"]
     if s["n_checkable"]:
         ratio = s["pass_ratio"]
-        concl = ("物理一致性总体良好（PASS+WEAK 占可检验条目的 {:.0f}%）。".format(ratio * 100)
+        concl = ("物理合理性总体良好（支持+证据不足占可检验条目的 {:.0f}%）。".format(ratio * 100)
                  if ratio >= 0.7 else
-                 "物理一致性待改善：建议优先排查 FAIL 条目（见上）后补充实验。")
+                 "物理合理性待改善：建议优先排查「局部相反」条目（见上）后补充实验。")
         lines.append(f"- {concl}")
-    lines += ["", "> 全部符号与数值来自真实计算（Spearman / Theil-Sen 斜率），无人工设定结论。"]
-    (PHYS_DIR / "物理一致性报告.md").write_text("\n".join(lines), encoding="utf-8")
+    lines += ["", "> 全部符号与数值来自真实计算（Spearman / Theil-Sen 斜率），无人工设定结论；",
+              "> 本检验为合理性诊断，不宣称发现普适因果规律（期望方向本身是待检验假设）。"]
+    (PHYS_DIR / "物理合理性诊断报告.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def physics_status():
-    """供状态面板/总报告。"""
+def physics_status(current_model_version=None, current_dataset_hash=None):
+    """供状态面板/总报告（V1.8：含时效性判定）。"""
     try:
         with open(RESULT_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        return {"done": True, "summary": data.get("summary"),
-                "generated_at": data.get("generated_at")}
+        fr = freshness(data, current_model_version, current_dataset_hash)
+        # 旧版结果文件的判定词自动映射到 V1.8 语义
+        summary = data.get("summary") or {}
+        if "PASS" in summary and "SUPPORT" not in summary:
+            summary = {(_LEGACY_MAP.get(k, k)): v for k, v in summary.items()}
+        return {"done": True, "summary": summary,
+                "generated_at": data.get("generated_at"),
+                "freshness": fr["state"], "freshness_note": fr["note"],
+                "report": "物理合理性诊断报告.md"}
     except Exception:
         return {"done": False}
