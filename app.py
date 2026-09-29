@@ -1,6 +1,9 @@
 from pathlib import Path
 from datetime import datetime
 import hashlib
+import json
+import os
+import tempfile
 import joblib
 import numpy as np
 import pandas as pd
@@ -30,6 +33,9 @@ from src.context import (build_context, context_status_items, context_detail_lin
                          context_pill_text, context_cv_short)
 from src import insights as insight_mod
 from src import quick_analysis as qa
+# 图片导入（参数表截图 / 拍照）：Apple Vision 本地 OCR，ocrmac 缺失（Windows）时模块
+# 优雅降级，OCRMAC_AVAILABLE=False，入口自动隐藏。
+from src import image_import as imgimp
 from src.figure_analysis import analyze_figure
 from src import plot_style as pstyle          # V1.6：网页图表样式唯一来源
 from src import evidence as evidence_mod      # V1.6：全程可溯源（P0-2）
@@ -91,28 +97,72 @@ OUTPUT_PREFIX = output_prefix(MODE_ID, DATA_KIND)
 
 # A Quick Run is an isolated, selectable workspace. Its data, role mapping and
 # model must always travel together; never silently promote it to formal data.
-_quick_ids = [r["run_id"] for r in qa.latest_runs(30)
-              if not r.get("failed") and r.get("research_mode") == MODE_ID]
+# 旧格式 Run 缺 workspace 快照无法载入：不进入下拉（运行历史里仍可见），
+# 避免用户选中后反复报错。
+_quick_recs = [r for r in qa.latest_runs(30)
+               if not r.get("failed") and r.get("research_mode") == MODE_ID
+               and (qa.QUICK_ROOT / r["run_id"] / qa.WORKSPACE_NAME).exists()]
+_quick_ids = [r["run_id"] for r in _quick_recs]
 _active_id = st.session_state.get("active_quick_run_id")
+# 人话标签 → run_id（后台仍以原始 Run ID 为唯一主键，显示文字不做键）。
+# 标签冲突（同分钟同文件同层级）时追加 Run 编号尾段去重，绝不静默挤掉。
+_label2id = {"正式项目数据与模型": None}
+_lab_seen = {}
+for _r in _quick_recs:
+    _lab = qa.run_display_label(_r) if hasattr(qa, "run_display_label") else _r["run_id"]
+    if _lab in _lab_seen or _lab in _label2id:
+        _lab_seen[_lab] = _lab_seen.get(_lab, 0) + 1
+        _lab = f"{_lab}（#{_lab_seen[_lab]}·…{_r['run_id'][-6:]}）"
+    else:
+        _lab_seen[_lab] = 0
+    _label2id[_lab] = _r["run_id"]
+
+def _ctx_pick_changed():
+    """侧边栏切换「当前分析」（用户交互）：更新权威 active_quick_run_id、
+    同步首页摘要卡，并清理不属于新 Run 的页面缓存。回调先于同步检查执行。"""
+    _rid = _label2id.get(st.session_state.get("ctx_pick"))
+    if _rid is None:
+        st.session_state.pop("active_quick_run_id", None)
+        st.session_state.pop("smart_summary_run_id", None)
+    else:
+        st.session_state["active_quick_run_id"] = _rid
+        st.session_state["smart_summary_run_id"] = _rid
+    st.session_state["quick_workspace_cache"] = {}
+
 with st.sidebar:
-    _workspace_pick = st.selectbox("当前工作上下文", ["正式数据与模型"] + _quick_ids,
-                                   index=_quick_ids.index(_active_id) + 1
-                                   if _active_id in _quick_ids else 0)
-if _workspace_pick == "正式数据与模型":
+    # 同步检查：active_quick_run_id 被首页等入口程序化改变、或 ctx_pick 无效/
+    # 陈旧时归位。用户经 selectbox 的交互变更由 _ctx_pick_changed 回调先行
+    # 处理，因此不会被此处弹回（修复 C3：index 参与 widget 身份导致二次切换弹回）。
+    if (st.session_state.get("ctx_pick") not in _label2id
+            or _label2id.get(st.session_state.get("ctx_pick")) != _active_id):
+        _active_label = next((lab for lab, rid in _label2id.items()
+                              if rid == _active_id), None)
+        st.session_state["ctx_pick"] = _active_label or "正式项目数据与模型"
+    _workspace_pick = st.selectbox("当前分析", list(_label2id.keys()),
+                                   key="ctx_pick", on_change=_ctx_pick_changed)
+    st.caption("决定各页面使用哪次导入的数据和模型。")
+    if _workspace_pick != "正式项目数据与模型":
+        with st.expander("运行详情（编号可复制）", expanded=False):
+            st.code(_label2id[_workspace_pick], language=None)
+if _workspace_pick == "正式项目数据与模型":
     st.session_state.pop("active_quick_run_id", None)
     ACTIVE_QUICK_ID = None
     QUICK_WORKSPACE = None
 else:
-    ACTIVE_QUICK_ID = _workspace_pick
+    ACTIVE_QUICK_ID = _label2id[_workspace_pick]
     st.session_state["active_quick_run_id"] = ACTIVE_QUICK_ID
+    # 单一权威 active_run_id：侧边栏选择同步首页摘要卡
+    if st.session_state.get("smart_summary_run_id") != ACTIVE_QUICK_ID:
+        st.session_state["smart_summary_run_id"] = ACTIVE_QUICK_ID
     try:
-        _quick_cache = st.session_state.get("quick_workspace_cache") or {}
-        if ACTIVE_QUICK_ID not in _quick_cache:
-            _quick_cache[ACTIVE_QUICK_ID] = qa.load_quick_workspace(ACTIVE_QUICK_ID)
-            st.session_state["quick_workspace_cache"] = _quick_cache
-        QUICK_WORKSPACE = _quick_cache[ACTIVE_QUICK_ID]
+        # 切换运行即清理不属于当前 Run 的页面缓存
+        st.session_state["quick_workspace_cache"] = {
+            ACTIVE_QUICK_ID: (st.session_state.get("quick_workspace_cache") or {})
+            .get(ACTIVE_QUICK_ID) or qa.load_quick_workspace(ACTIVE_QUICK_ID)}
+        QUICK_WORKSPACE = st.session_state["quick_workspace_cache"][ACTIVE_QUICK_ID]
     except (ValueError, OSError, KeyError) as e:
-        st.sidebar.error(f"快速运行无法载入：{e}")
+        st.sidebar.error(f"当前分析无法载入（{e}）。可选择其他运行，"
+                         f"或重新执行智能分析生成新运行。")
         QUICK_WORKSPACE = None
         ACTIVE_QUICK_ID = None
         st.session_state.pop("active_quick_run_id", None)
@@ -585,6 +635,330 @@ def _smart_run_analysis(file_obj):
             st.warning("提示：\n- " + "\n- ".join(_warns[:6]))
 
 
+# ---------------- 图片导入（参数表截图 / 拍照）：本地 OCR → 确认 → 分析/预测 ----------------
+# 原则：确认前绝不训练/预测；不造数据点；曲线图/SEM 不识别为表；psi 绝不换算 slpm；
+# 图片只在本机识别（Apple Vision），不上传任何在线服务。
+
+def _dedup_columns(cols):
+    """OCR 表头可能重复（识别噪声）：重名列加 #2、#3 后缀，保证 DataFrame 列名唯一。"""
+    seen, out = {}, []
+    for c in cols:
+        name = str(c).strip() or "未命名列"
+        if name in seen:
+            seen[name] += 1
+            out.append(f"{name}#{seen[name]}")
+        else:
+            seen[name] = 1
+            out.append(name)
+    return out
+
+
+def _save_uploaded_image_to_tmp(uploaded):
+    """把上传图片字节写到临时文件（ocrmac 需要磁盘路径）；用后由调用方删除。"""
+    suffix = Path(uploaded.name).suffix.lower() or ".png"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="img_import_")
+    with os.fdopen(fd, "wb") as f:
+        f.write(uploaded.getvalue())
+    return tmp_path
+
+
+def _image_cell_diff_count(orig_df, edited_df):
+    """统计用户在 data_editor 中实际修改过的单元格数（数值按容差比较）。"""
+    if list(orig_df.columns) != list(edited_df.columns) or \
+            len(orig_df) != len(edited_df):
+        return -1  # 结构变化（异常），按全量修改对待
+    n = 0
+    for r in range(len(orig_df)):
+        for c in orig_df.columns:
+            a, b = orig_df.iloc[r][c], edited_df.iloc[r][c]
+            try:
+                if pd.isna(a) and pd.isna(b):
+                    continue
+                if pd.notna(a) and pd.notna(b) and not isinstance(a, str) \
+                        and not isinstance(b, str):
+                    if abs(float(a) - float(b)) > 1e-9:
+                        n += 1
+                elif str(a).strip() != str(b).strip():
+                    n += 1
+            except (TypeError, ValueError):
+                if str(a) != str(b):
+                    n += 1
+    return n
+
+
+def _write_image_meta(run_id, state, role_map, edit_count, unit_warns):
+    """确认后落盘图片导入溯源：image_meta.json + workspace.json 补 data_provenance。
+
+    data_provenance = "image_ocr_verified"：该 run 的数据为「图片提取并经人工核对」，
+    既非「实验实测值」也非「模型预测值」。load_quick_workspace 忽略未知键，安全。
+    """
+    run_dir = qa.QUICK_ROOT / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "image_filename": state.get("name"),
+        "image_sha256": state.get("sha256"),
+        "ocr_engine": state.get("ocr_engine"),
+        "ocr_raw_count": state.get("ocr_raw_count"),
+        "user_edits_count": int(edit_count or 0),
+        "unit_warnings": list(unit_warns or []),
+        "role_map": dict(role_map or {}),
+        "data_provenance": "image_ocr_verified",
+        "confirmed_at": datetime.now().isoformat(timespec="seconds"),
+        "run_id": run_id,
+    }
+    (run_dir / "image_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    ws_path = run_dir / qa.WORKSPACE_NAME
+    if ws_path.exists():
+        try:
+            ws = json.loads(ws_path.read_text(encoding="utf-8"))
+            ws["data_provenance"] = "image_ocr_verified"
+            ws_path.write_text(json.dumps(ws, ensure_ascii=False, indent=2,
+                                          default=str), encoding="utf-8")
+        except Exception as e:
+            log_event("image_meta_workspace_patch_error", f"{run_id}: {e}")
+    return meta
+
+
+def _image_candidate_models():
+    """当前研究模式的候选模型（正式 + Quick Run），返回 [{label, bundle, source}]。"""
+    candidates = []
+    if MODEL.exists():
+        try:
+            candidates.append({"label": f"正式模型（{MODE['label']}）",
+                               "bundle": joblib.load(MODEL), "source": "formal"})
+        except Exception:
+            pass
+    for rec in qa.latest_runs(30):
+        if rec.get("failed") or rec.get("research_mode") != MODE_ID:
+            continue
+        try:
+            ws = qa.load_quick_workspace(rec["run_id"])
+            candidates.append({"label": f"Quick Run {rec['run_id']}（{rec.get('sheet') or '数据表'}）",
+                               "bundle": ws["bundle"], "source": "quick"})
+        except Exception:
+            continue
+    return candidates
+
+
+def _render_image_prediction_mode(row_df, role_map, state):
+    """分支 a：图片只有 1 行工艺参数（无实测目标）→ 选兼容模型做正向预测。
+
+    绝不重新训练；无兼容模型时如实说明，流程终止。
+    """
+    st.info("图片只有 1 行工艺参数、没有实测目标 → 进入「参数预测」模式："
+            "选择兼容的已训练模型做正向预测（不会重新训练任何模型）。")
+    id_cols = {c for c, r in role_map.items() if r == "identifier"}
+    param_cols = [c for c in row_df.columns if c not in id_cols]
+    X = row_df.reindex(columns=param_cols).apply(pd.to_numeric, errors="coerce")
+
+    candidates = _image_candidate_models()
+    compatible = []
+    for cand in candidates:
+        x_cols = list(cand["bundle"].get("x_cols") or [])
+        if not x_cols:
+            continue
+        covered = sum(1 for c in x_cols if c in X.columns)
+        if covered / len(x_cols) >= 0.6:   # 覆盖 ≥60% 视为兼容；缺失列由中位数插补
+            compatible.append(cand)
+    if not compatible:
+        st.error("当前研究模式没有与该行工艺参数兼容的已训练模型，无法预测。"
+                 "本入口不会为无目标数据重新训练——请先导入含实测目标的数据完成训练，"
+                 "或人工整理后走 Excel 导入。")
+        return
+    labels = [c["label"] for c in compatible]
+    pick = st.selectbox("选择用于预测的模型（仅列出兼容模型）", labels,
+                        key=f"img_pred_model_{state['sha256'][:8]}")
+    bundle = compatible[labels.index(pick)]["bundle"]
+    missing = [c for c in bundle.get("x_cols", []) if c not in X.columns]
+    if missing:
+        st.caption(f"模型需要但图片未提供的输入列（将按训练数据中位数插补）：{'、'.join(missing)}")
+    if st.button("▶ 用该行参数做正向预测", type="primary",
+                 key=f"img_pred_run_{state['sha256'][:8]}"):
+        try:
+            with st.spinner("正向预测中（predict_chain 全链）…"):
+                states, defects, perf, unc, melt = predict_chain(
+                    X, bundle, return_melting=True)
+            st.success("预测完成（模型预测值，非实测值；不回写训练数据）。")
+            for title, block in (("过程状态（Stage 1 预测）", states),
+                                 ("涂层缺陷（Stage 2 预测）", defects),
+                                 ("涂层性能（Stage 3 预测）", perf)):
+                if block is not None and len(block.columns):
+                    st.markdown(f"**{title}**")
+                    st.dataframe(block.T.rename(columns={X.index[0]: "预测值"}),
+                                 width="stretch")
+        except Exception as e:
+            st.error(f"预测失败：{friendly_error(e)}")
+
+
+def _run_image_training(edited_df, role_map, state, edit_count):
+    """分支 b：有 ≥1 个实测目标列 → 转 DataFrame 交给现有校验 + run_quick_analysis。
+
+    - 列名保留 OCR 表头原文；source_filename = 图片文件名；
+    - 样本数 / 目标有效值不足训练门槛（20）时，数据准备检查会拦截，如实显示原因；
+    - 未定义优化方向（默认全部 prediction_only），绝不自动认定 maximize/minimize。
+    """
+    confirm_map = {c: r for c, r in role_map.items()
+                   if r in ("x", "states", "defects", "performance")}
+    source_name = state.get("name") or "图片导入"
+    with st.status("图片数据智能分析运行中…", expanded=True) as prog:
+        _lines = []
+
+        def _cb(name, status_, msg=""):
+            tag = {"running": "▶", "done": "✓", "skip": "跳过",
+                   "fail": "失败"}.get(status_, "·")
+            _lines.append(f"{tag} {name}"
+                          + (f"（{msg}）" if msg and status_ in ("fail", "skip") else ""))
+            prog.write("\n".join(_lines[-12:]))
+
+        try:
+            result = qa.run_quick_analysis(edited_df, sheet_name=source_name,
+                                           source_filename=source_name,
+                                           confirm_map=confirm_map,
+                                           progress_cb=_cb, demo=False)
+        except Exception as e:
+            st.error(f"图片数据分析失败：{friendly_error(e)}")
+            return
+    record = result.get("record") or {}
+    if record.get("failed"):
+        fails = [f"{n}：{rsn}" for n, s_, rsn in result.get("steps", [])
+                 if s_ == "fail" and rsn]
+        st.error("数据校验/训练未通过（如实显示，不产出半成品结果）：\n- "
+                 + "\n- ".join(fails[:6]))
+        st.caption("常见原因：图片行数不足（训练门槛 ≥20 条有效目标值）或缺少可训练目标。"
+                   "图片导入适合规整的批量参数表，单行参数请用于预测。")
+        return
+    # 溯源落盘：image_meta.json + workspace.json data_provenance
+    unit_warns = imgimp.unit_warnings(list(role_map.keys()), role_map)
+    _write_image_meta(result["run_id"], state, role_map, edit_count, unit_warns)
+    st.success(f"已完成 run {result['run_id']}。数据来源标记：图片提取并经人工核对"
+               "（data_provenance = image_ocr_verified，非「实验实测值」、非「模型预测值」）。")
+    st.session_state["smart_summary_run_id"] = result["run_id"]
+    st.session_state["sum_run_pick"] = result["run_id"]
+    if result.get("mode") == MODE_ID:
+        st.session_state["active_quick_run_id"] = result["run_id"]
+        st.rerun()
+
+
+def _render_image_import():
+    """首页智能操作区：图片导入入口（PNG/JPG 参数表截图 / 手机拍照）。
+
+    流程：上传 → 本机 OCR → 表格判定（非表格拦截）→ 原图+可编辑表确认 →
+    角色确认（预填+单位警告）→ 确认后进入预测 / 训练分支。
+    """
+    _entry_open = st.session_state.get("img_import_open", False)
+    with st.expander("🖼 图片导入（参数表截图 / 拍照）", expanded=_entry_open):
+        if not getattr(imgimp, "OCRMAC_AVAILABLE", False):
+            st.caption("图片识别依赖 Apple Vision 本地 OCR（ocrmac），仅 macOS 可用；"
+                       "当前环境不可用。请使用上方「智能一键导入」上传 Excel / CSV。")
+            return
+        st.caption("支持 PNG / JPG 参数表截图或手机拍照；全部识别在本机完成"
+                   "（Apple Vision OCR），图片不会上传到任何在线服务。"
+                   "确认前绝不训练、绝不预测。")
+        img_file = st.file_uploader("上传参数表图片", type=["png", "jpg", "jpeg"],
+                                    key="img_import_uploader")
+        if img_file is None:
+            st.session_state.pop("img_import_state", None)
+            return
+        img_hash = hashlib.sha256(img_file.getvalue()).hexdigest()
+        state = st.session_state.get("img_import_state")
+        if state is None or state.get("sha256") != img_hash:
+            tmp_path = None
+            try:
+                with st.spinner("正在本机识别图片文字（Apple Vision OCR）…"):
+                    tmp_path = _save_uploaded_image_to_tmp(img_file)
+                    ocr = imgimp.ocr_image_to_rows(tmp_path)
+            except Exception as e:
+                st.error(f"图片识别失败：{friendly_error(e)}")
+                st.session_state.pop("img_import_state", None)
+                return
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            table = imgimp.rebuild_table(ocr)
+            ok, reason = imgimp.is_likely_table(ocr)
+            state = {"sha256": img_hash, "name": img_file.name, "ocr": ocr,
+                     "table": table, "is_table": bool(ok), "reason": reason,
+                     "ocr_raw_count": len(ocr.get("raw") or []),
+                     "ocr_engine": ocr.get("engine", imgimp.ENGINE_NAME)}
+            st.session_state["img_import_state"] = state
+
+        if not state["is_table"]:
+            st.error(f"未能识别为参数表，流程终止（未创建任何运行）：{state['reason']}")
+            st.caption("请上传行列清晰的参数表截图/拍照；曲线图、SEM 照片、流程图"
+                       "不支持自动识别为表——这是平台的有意限制，防止把曲线误当数据点。")
+            return
+
+        table = state["table"]
+        header = _dedup_columns(table["header"])
+        # 行列数防御性对齐（OCR 噪声导致个别行缺格时补空串）
+        n_cols = len(header)
+        rows_pad = [(list(r) + [""] * n_cols)[:n_cols] for r in table["rows"]]
+        df_tbl = pd.DataFrame(rows_pad, columns=header)
+
+        c_img, c_tbl = st.columns([1, 2])
+        with c_img:
+            st.image(img_file, caption=f"原图：{img_file.name}")
+            st.caption(f"识别引擎：{state['ocr_engine']}（本机）｜ "
+                       f"原始文本块 {state['ocr_raw_count']} 个 ｜ "
+                       f"重建表格：{len(df_tbl)} 行 × {n_cols} 列")
+        with c_tbl:
+            st.markdown("**识别结果（可直接编辑修正，确认后以编辑值为准）**")
+            if table["low_confidence"]:
+                marks = "；".join(
+                    f"第{r + 1}行第{c + 1}列「{t}」(置信度 {cf})"
+                    for r, c, t, cf in table["low_confidence"][:8])
+                more = "……" if len(table["low_confidence"]) > 8 else ""
+                st.warning("以下单元格置信度较低，请重点核对：" + marks + more)
+            edited_df = st.data_editor(df_tbl, num_rows="fixed",
+                                       key=f"img_editor_{state['sha256'][:8]}",
+                                       width="stretch", hide_index=True)
+
+        st.markdown("**确认各列角色**（已按表头自动预填；未识别的列请人工指定）")
+        role_labels = {"ignore": "忽略", "x": "输入X", "states": "过程状态Y",
+                       "defects": "涂层缺陷Y", "performance": "涂层性能Y",
+                       "identifier": "标识列"}
+        label2role = {v: k for k, v in role_labels.items()}
+        prefill_roles = imgimp.guess_column_roles(list(df_tbl.columns))
+        role_map = {}
+        for col in df_tbl.columns:
+            pre = prefill_roles.get(col) or "ignore"
+            opts = list(label2role.keys())
+            choice = st.selectbox(
+                f"「{col}」的角色", opts,
+                index=opts.index(label2role[pre]) if label2role[pre] in opts else 0,
+                key=f"img_role_{state['sha256'][:8]}_{abs(hash(col)) % 10 ** 8}")
+            role_map[col] = label2role[choice]
+        for w in imgimp.unit_warnings(list(df_tbl.columns), role_map):
+            st.warning(w)
+
+        if st.button("✅ 确认并进入下一步", type="primary",
+                     key=f"img_confirm_{state['sha256'][:8]}"):
+            # 确认前绝不训练 / 绝不预测：所有分支都从这里才开始
+            confirm_df = (edited_df if edited_df is not None else df_tbl).copy()
+            diff_count = _image_cell_diff_count(df_tbl, confirm_df)
+            state["unit_warnings"] = imgimp.unit_warnings(list(df_tbl.columns),
+                                                          role_map)
+            state["role_map"] = dict(role_map)
+            state["user_edits_count"] = max(0, int(diff_count))
+            target_cols = [c for c, r in role_map.items()
+                           if r in ("states", "defects", "performance")]
+            if not target_cols:
+                if len(confirm_df) == 1:
+                    _render_image_prediction_mode(confirm_df, role_map, state)
+                else:
+                    st.error("图片只有工艺参数、没有实测目标，不能作为训练数据；"
+                             "可单行用于预测，或人工整理后走 Excel 导入。")
+                return
+            _run_image_training(confirm_df, role_map, state, diff_count)
+            return
+
+        st.caption("请核对低置信单元格与各列角色后，点击「确认并进入下一步」。")
+
+
 def render_smart_summary(run_id):
     """A short, honest result first; full metrics and registered evidence on demand."""
     summ = qa.load_smart_summary(run_id)
@@ -888,6 +1262,10 @@ with tab0:
             st.caption(f"已缓存待分析文件：{st.session_state['qa_file_cache'].name}"
                        "（点击「✦ 智能分析」开始；重新点击「⬆ 智能一键导入」可更换文件）")
 
+    # ---------- ⬆b 图片导入（参数表截图 / 拍照）：Excel 导入旁的第二入口 ----------
+    # 本机 Apple Vision OCR；非表格图片拦截；确认前绝不训练/预测；Windows 上自动隐藏。
+    _render_image_import()
+
     # 三步指示器（P1-3）：在智能操作区之下、分析执行之后渲染，确保显示最新状态
     render_step_indicator()
     if _smart_run_now and st.session_state.get("qa_file_cache") is not None:
@@ -898,13 +1276,39 @@ with tab0:
     if st.session_state.get("smart_summary_run_id"):
         _sum_runs = [h for h in qa.latest_runs(10) if not h.get("failed")]
         if len(_sum_runs) > 1:
-            _pick = st.selectbox("查看运行", [h["run_id"] for h in _sum_runs],
-                                 index=[h["run_id"] for h in _sum_runs].index(
-                                     st.session_state["smart_summary_run_id"])
-                                 if st.session_state["smart_summary_run_id"] in
-                                 [h["run_id"] for h in _sum_runs] else 0,
-                                 key="sum_run_pick")
-            st.session_state["smart_summary_run_id"] = _pick
+            # 标签去重（与侧边栏同一套逻辑）：同分钟同文件的 run 不互相挤掉
+            _sum_label2id = {}
+            _seen_sum = {}
+            for _h in _sum_runs:
+                _lab = (qa.run_display_label(_h) if hasattr(qa, "run_display_label")
+                        else _h["run_id"])
+                if _lab in _seen_sum or _lab in _sum_label2id:
+                    _seen_sum[_lab] = _seen_sum.get(_lab, 0) + 1
+                    _lab = f"{_lab}（#{_seen_sum[_lab]}·…{_h['run_id'][-6:]}）"
+                else:
+                    _seen_sum[_lab] = 0
+                _sum_label2id[_lab] = _h["run_id"]
+
+            def _sum_pick_changed():
+                """首页查看运行切换：同步权威 active_quick_run_id 与摘要卡。"""
+                _rid = _sum_label2id.get(st.session_state.get("sum_run_pick"))
+                if _rid is not None:
+                    st.session_state["smart_summary_run_id"] = _rid
+                    st.session_state["active_quick_run_id"] = _rid
+                    st.session_state["quick_workspace_cache"] = {}
+
+            # 陈旧值归位：smart_summary_run_id 被侧边栏等入口改变时，
+            # 查看运行选择器跟随（不覆盖权威状态，无 rerun 劫持）。
+            _cur_id = st.session_state.get("smart_summary_run_id")
+            _cur_lab = next((lab for lab, rid in _sum_label2id.items()
+                             if rid == _cur_id), None)
+            if _cur_lab is not None:
+                if st.session_state.get("sum_run_pick") != _cur_lab:
+                    st.session_state["sum_run_pick"] = _cur_lab
+            elif st.session_state.get("sum_run_pick") not in _sum_label2id:
+                st.session_state["sum_run_pick"] = next(iter(_sum_label2id))
+            _pick_id = _sum_label2id[st.session_state["sum_run_pick"]]
+            st.session_state["smart_summary_run_id"] = _pick_id
         render_smart_summary(st.session_state["smart_summary_run_id"])
 
     with st.expander("研究路线（可选）", expanded=False):
@@ -926,6 +1330,12 @@ with tab0:
     qa_hist = qa.latest_runs(10)
     if qa_hist:
         with st.expander(f"运行历史（Run History，最近 {len(qa_hist)} 次）", expanded=False):
+            _hist_q = st.text_input("检索历史运行（输入编号 / 文件名关键词）", "")
+            if _hist_q:
+                qa_hist = [h for h in qa_hist if _hist_q.lower() in
+                           json.dumps(h, ensure_ascii=False).lower()]
+                if not qa_hist:
+                    st.caption("没有匹配的运行记录。")
             hist_rows = []
             for h in qa_hist:
                 hist_rows.append({

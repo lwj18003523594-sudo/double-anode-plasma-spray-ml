@@ -146,6 +146,32 @@ LITERATURE_ROLE_ALIASES = {
     "粒子温度(°c)": "states", "粒子速度(m/s)": "states",
     "particle_temperature_c": "states", "particle_velocity_m_s": "states",
 }
+def run_display_label(rec):
+    """Run 人话标签：本次分析｜9月29日 17:29｜工作簿1｜32条｜仅过程预测。"""
+    from datetime import datetime as _dt
+    try:
+        t = _dt.fromisoformat(str(rec.get("date", ""))).strftime("%m月%d日 %H:%M")
+    except (ValueError, TypeError):
+        t = "时间未知"
+    fn = rec.get("source_filename") or rec.get("sheet") or "数据表"
+    # 旧记录缺字段时省略对应片段（而非显示"未知"），主键仍是 run_id
+    parts = [f"本次分析｜{t}｜{fn}"]
+    if rec.get("valid_rows"):
+        parts.append(f"{rec['valid_rows']}条")
+    if rec.get("trained_levels"):
+        parts.append(rec["trained_levels"])
+    return "｜".join(parts)
+
+
+def run_fallback_label(rec):
+    from datetime import datetime as _dt
+    try:
+        t = _dt.fromisoformat(str(rec.get("date", ""))).strftime("%m月%d日 %H:%M")
+    except (ValueError, TypeError):
+        t = ""
+    return f"运行 {t}｜{rec.get('run_id', '?')}"
+
+
 IDENTIFIER_COLUMNS = {"喷涂序号", "spray_run_id", "experiment_id", "batch_id"}
 
 ROLE_SECTIONS = {
@@ -374,7 +400,7 @@ def classify_sheets(sheet_names):
 
 
 def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
-                       progress_cb=None, demo=False):
+                       progress_cb=None, demo=False, source_filename=None):
     """对单个数据表执行一键科研分析（分步容错，单步失败不丢失其他结果）。
 
     返回 summary dict：run_id / mode / steps(状态) / schema / bundle / paths / record。
@@ -454,6 +480,7 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
         p = run_dir / "model.joblib"
         b = train_chain_full(df, schema, p, n_splits=None)
         b["field_map"] = _field_map_record
+        b["sample_count"] = int(len(df))
         bundle.update(b)
         # 复现清单补全：字段映射 + 关键程序文件哈希写入 run 的 manifest
         import hashlib as _hl
@@ -601,17 +628,26 @@ def run_quick_analysis(df, sheet_name="Data", run_id=None, confirm_map=None,
                     "oof_export": oof_export, "pareto": pareto_result,
                     "warnings": (check or {}).get("warning", [])},
                    sheet_name, demo, failed=pkg is None,
+                   source_filename=source_filename,
                    manifest_path=manifest_path, summary_path=summary_path)
 
 
 def _finish(run_id, mode_id, steps, bundle, schema, extras, sheet_name, demo,
-            failed=False, manifest_path=None, summary_path=None):
+            failed=False, manifest_path=None, summary_path=None,
+            source_filename=None):
+    stage3_ok = bool((bundle or {}).get("stage3_models"))
+    stage2_ok = bool((bundle or {}).get("stage2_models"))
+    trained_levels = ("含涂层性能层" if stage3_ok else
+                      "含缺陷层" if stage2_ok else "仅过程预测")
     record = {
         "run_id": run_id,
         "date": datetime.now().isoformat(timespec="seconds"),
         "research_mode": mode_id,
         "data_source": "quick_analysis",
         "sheet": sheet_name,
+        "source_filename": source_filename,
+        "valid_rows": int((bundle or {}).get("sample_count") or 0) or None,
+        "trained_levels": trained_levels,
         "dataset_version": ("auto_" + str(bundle.get("dataset_hash"))[:8]) if bundle else None,
         "model_version": bundle.get("model_version") if bundle else None,
         "targets": list((bundle or {}).get("stage3_models", {}).keys())[:8],
@@ -866,6 +902,7 @@ def quick_analyze_file(file_or_path, run_prefix=None, progress_cb=None, demo=Fal
                             if k.lower() in original_columns}
         confirm["_directions"] = {**sheet_directions, **(confirm.get("_directions") or {})}
         res = run_quick_analysis(df, sheet_name=sn, run_id=rid,
-                                 confirm_map=confirm, progress_cb=progress_cb, demo=demo)
+                                 confirm_map=confirm, progress_cb=progress_cb, demo=demo,
+                                 source_filename=str(getattr(file_or_path, "name", file_or_path)))
         results.append(res)
     return results

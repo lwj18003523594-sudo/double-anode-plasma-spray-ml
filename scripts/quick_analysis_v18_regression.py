@@ -92,7 +92,8 @@ def test_literature_process_only():
         at.button(key="smart_analyze_btn").click().run()
         assert not at.exception, [str(x.message) for x in at.exception]
         assert len(qa.load_history()) == history_count  # Viewing must not retrain.
-        at.sidebar.selectbox[0].select("正式数据与模型").run()
+        # V1.6：侧边栏「当前分析」下拉的默认项文案（app.py _label2id 键名）
+        at.sidebar.selectbox[0].select("正式项目数据与模型").run()
         assert not at.exception, [str(x.message) for x in at.exception]
         assert at.session_state["ctx"]["active_run_id"] is None
 
